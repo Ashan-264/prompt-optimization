@@ -286,7 +286,7 @@ Scores: Factuality=${test.scores.factuality}, Battle=${
 ORIGINAL PROMPT:
 ${originalPrompt}
 
-FAILED TEST CASES (score < 0.5):
+FAILED TEST CASES (score < 0.8):
 ${failureAnalysis}
 
 INSTRUCTIONS:
@@ -448,8 +448,8 @@ export async function POST(request: NextRequest) {
         `${results.length} tests executed`
       );
 
-      // Step 3: Filter failing tests (score < 0.7)
-      const failedTests = results.filter((r) => r.scores.overall < 0.7);
+      // Step 3: Filter failing tests (score < 0.8)
+      const failedTests = results.filter((r) => r.scores.overall < 0.8);
 
       // Step 4: Get improved prompts if there are failures
       let improvedPrompts: Array<{
@@ -483,7 +483,7 @@ export async function POST(request: NextRequest) {
 
       // Calculate stats
       const totalTests = results.length;
-      const passedTests = results.filter((r) => r.scores.overall >= 0.5).length;
+      const passedTests = results.filter((r) => r.scores.overall >= 0.8).length;
       const avgScore =
         results.reduce((sum, r) => sum + r.scores.overall, 0) / totalTests;
 

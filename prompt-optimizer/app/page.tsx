@@ -821,222 +821,226 @@ export default function Home() {
                           synthetic test cases with Gemini Flash 2.5
                         </p>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <div className="text-center">
-                          <div className="text-3xl font-bold text-green-600 dark:text-green-400">
-                            {braintrustEvaluation.summary.success_rate}%
+                          <div className="text-center">
+                            <div className="text-3xl font-bold text-green-600 dark:text-green-400">
+                              {braintrustEvaluation.summary.success_rate}%
+                            </div>
+                            <div className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                              Success Rate
+                            </div>
                           </div>
-                          <div className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-                            Success Rate
+                          <div className="text-center">
+                            <div className="text-3xl font-bold text-emerald-600 dark:text-emerald-400">
+                              {braintrustEvaluation.summary.passed_tests}/
+                              {braintrustEvaluation.summary.total_tests}
+                            </div>
+                            <div className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                              Tests Passed
+                            </div>
                           </div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-3xl font-bold text-emerald-600 dark:text-emerald-400">
-                            {braintrustEvaluation.summary.passed_tests}/
-                            {braintrustEvaluation.summary.total_tests}
+                          <div className="text-center">
+                            <div className="text-3xl font-bold text-red-600 dark:text-red-400">
+                              {braintrustEvaluation.summary.failed_tests || 0}
+                            </div>
+                            <div className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                              Tests Failed
+                            </div>
                           </div>
-                          <div className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-                            Tests Passed
-                          </div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-3xl font-bold text-red-600 dark:text-red-400">
-                            {braintrustEvaluation.summary.failed_tests || 0}
-                          </div>
-                          <div className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-                            Tests Failed
-                          </div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-3xl font-bold text-teal-600 dark:text-teal-400">
-                            {braintrustEvaluation.summary.average_score}
-                          </div>
-                          <div className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
-                            Avg Score
+                          <div className="text-center">
+                            <div className="text-3xl font-bold text-teal-600 dark:text-teal-400">
+                              {braintrustEvaluation.summary.average_score}
+                            </div>
+                            <div className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                              Avg Score
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
                     )}
 
                     {/* Test Results with Detailed Scores */}
                     {braintrustEvaluation && (
                       <div className="bg-white dark:bg-zinc-900 rounded-lg p-6 border border-zinc-200 dark:border-zinc-700">
                         <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50 mb-4">
-                          Test Results (4 Metrics: Factuality, Battle, JSON, Tone)
+                          Test Results (4 Metrics: Factuality, Battle, JSON,
+                          Tone)
                         </h3>
                         <div className="space-y-4">
                           {braintrustEvaluation.results.map((result, idx) => {
-                          const overallScore = result.scores?.overall ?? 0;
-                          const isPassed = overallScore >= 0.5;
+                            const overallScore = result.scores?.overall ?? 0;
+                            const isPassed = overallScore >= 0.8;
 
-                          return (
-                            <details
-                              key={idx}
-                              className={`border rounded-lg ${
-                                isPassed
-                                  ? "border-green-200 dark:border-green-800 bg-green-50/30 dark:bg-green-900/10"
-                                  : "border-red-200 dark:border-red-800 bg-red-50/30 dark:bg-red-900/10"
-                              }`}
-                            >
-                              <summary className="cursor-pointer p-4 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 rounded-lg">
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-3">
-                                    <span
-                                      className={`text-2xl ${
-                                        isPassed
-                                          ? "text-green-600 dark:text-green-400"
-                                          : "text-red-600 dark:text-red-400"
-                                      }`}
-                                    >
-                                      {isPassed ? "✓" : "✗"}
-                                    </span>
-                                    <div>
-                                      <div className="font-medium text-zinc-900 dark:text-zinc-50">
-                                        Test {idx + 1}:{" "}
-                                        {result.input.substring(0, 50)}...
-                                      </div>
-                                      {result.metadata?.category && (
-                                        <div className="text-xs text-zinc-500 dark:text-zinc-400">
-                                          Category: {result.metadata.category}
+                            return (
+                              <details
+                                key={idx}
+                                className={`border rounded-lg ${
+                                  isPassed
+                                    ? "border-green-200 dark:border-green-800 bg-green-50/30 dark:bg-green-900/10"
+                                    : "border-red-200 dark:border-red-800 bg-red-50/30 dark:bg-red-900/10"
+                                }`}
+                              >
+                                <summary className="cursor-pointer p-4 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 rounded-lg">
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-3">
+                                      <span
+                                        className={`text-2xl ${
+                                          isPassed
+                                            ? "text-green-600 dark:text-green-400"
+                                            : "text-red-600 dark:text-red-400"
+                                        }`}
+                                      >
+                                        {isPassed ? "✓" : "✗"}
+                                      </span>
+                                      <div>
+                                        <div className="font-medium text-zinc-900 dark:text-zinc-50">
+                                          Test {idx + 1}:{" "}
+                                          {result.input.substring(0, 50)}...
                                         </div>
-                                      )}
-                                    </div>
-                                  </div>
-                                  <div className="flex items-center gap-4">
-                                    <div className="text-right">
-                                      <div className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
-                                        {(overallScore * 100).toFixed(0)}%
-                                      </div>
-                                      <div className="text-xs text-zinc-500 dark:text-zinc-400">
-                                        Overall
+                                        {result.metadata?.category && (
+                                          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                                            Category: {result.metadata.category}
+                                          </div>
+                                        )}
                                       </div>
                                     </div>
+                                    <div className="flex items-center gap-4">
+                                      <div className="text-right">
+                                        <div className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
+                                          {(overallScore * 100).toFixed(0)}%
+                                        </div>
+                                        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                                          Overall
+                                        </div>
+                                      </div>
+                                    </div>
                                   </div>
-                                </div>
-                              </summary>
+                                </summary>
 
-                              <div className="px-4 pb-4 space-y-4">
-                                {/* Score Breakdown */}
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                                  <div className="bg-white dark:bg-zinc-800 rounded p-3 text-center border border-zinc-200 dark:border-zinc-700">
-                                    <div
-                                      className={`text-2xl font-bold ${
-                                        result.scores?.factuality === 1
-                                          ? "text-green-600 dark:text-green-400"
-                                          : "text-red-600 dark:text-red-400"
-                                      }`}
-                                    >
-                                      {result.scores?.factuality === 1
-                                        ? "✓"
-                                        : "✗"}
+                                <div className="px-4 pb-4 space-y-4">
+                                  {/* Score Breakdown */}
+                                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                                    <div className="bg-white dark:bg-zinc-800 rounded p-3 text-center border border-zinc-200 dark:border-zinc-700">
+                                      <div
+                                        className={`text-2xl font-bold ${
+                                          result.scores?.factuality === 1
+                                            ? "text-green-600 dark:text-green-400"
+                                            : "text-red-600 dark:text-red-400"
+                                        }`}
+                                      >
+                                        {result.scores?.factuality === 1
+                                          ? "✓"
+                                          : "✗"}
+                                      </div>
+                                      <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
+                                        Factuality
+                                      </div>
                                     </div>
-                                    <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
-                                      Factuality
+                                    <div className="bg-white dark:bg-zinc-800 rounded p-3 text-center border border-zinc-200 dark:border-zinc-700">
+                                      <div
+                                        className={`text-2xl font-bold ${
+                                          result.scores?.battle === 1
+                                            ? "text-green-600 dark:text-green-400"
+                                            : "text-red-600 dark:text-red-400"
+                                        }`}
+                                      >
+                                        {result.scores?.battle === 1
+                                          ? "✓"
+                                          : "✗"}
+                                      </div>
+                                      <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
+                                        Battle
+                                      </div>
+                                    </div>
+                                    <div className="bg-white dark:bg-zinc-800 rounded p-3 text-center border border-zinc-200 dark:border-zinc-700">
+                                      <div
+                                        className={`text-2xl font-bold ${
+                                          result.scores?.jsonValidity === 1
+                                            ? "text-green-600 dark:text-green-400"
+                                            : "text-red-600 dark:text-red-400"
+                                        }`}
+                                      >
+                                        {result.scores?.jsonValidity === 1
+                                          ? "✓"
+                                          : "✗"}
+                                      </div>
+                                      <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
+                                        JSON
+                                      </div>
+                                    </div>
+                                    <div className="bg-white dark:bg-zinc-800 rounded p-3 text-center border border-zinc-200 dark:border-zinc-700">
+                                      <div
+                                        className={`text-2xl font-bold ${
+                                          result.scores?.tone === 1
+                                            ? "text-green-600 dark:text-green-400"
+                                            : "text-red-600 dark:text-red-400"
+                                        }`}
+                                      >
+                                        {result.scores?.tone === 1 ? "✓" : "✗"}
+                                      </div>
+                                      <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
+                                        Tone
+                                      </div>
                                     </div>
                                   </div>
-                                  <div className="bg-white dark:bg-zinc-800 rounded p-3 text-center border border-zinc-200 dark:border-zinc-700">
-                                    <div
-                                      className={`text-2xl font-bold ${
-                                        result.scores?.battle === 1
-                                          ? "text-green-600 dark:text-green-400"
-                                          : "text-red-600 dark:text-red-400"
-                                      }`}
-                                    >
-                                      {result.scores?.battle === 1 ? "✓" : "✗"}
-                                    </div>
-                                    <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
-                                      Battle
-                                    </div>
-                                  </div>
-                                  <div className="bg-white dark:bg-zinc-800 rounded p-3 text-center border border-zinc-200 dark:border-zinc-700">
-                                    <div
-                                      className={`text-2xl font-bold ${
-                                        result.scores?.jsonValidity === 1
-                                          ? "text-green-600 dark:text-green-400"
-                                          : "text-red-600 dark:text-red-400"
-                                      }`}
-                                    >
-                                      {result.scores?.jsonValidity === 1
-                                        ? "✓"
-                                        : "✗"}
-                                    </div>
-                                    <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
-                                      JSON
-                                    </div>
-                                  </div>
-                                  <div className="bg-white dark:bg-zinc-800 rounded p-3 text-center border border-zinc-200 dark:border-zinc-700">
-                                    <div
-                                      className={`text-2xl font-bold ${
-                                        result.scores?.tone === 1
-                                          ? "text-green-600 dark:text-green-400"
-                                          : "text-red-600 dark:text-red-400"
-                                      }`}
-                                    >
-                                      {result.scores?.tone === 1 ? "✓" : "✗"}
-                                    </div>
-                                    <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
-                                      Tone
-                                    </div>
-                                  </div>
-                                </div>
 
-                                {/* Input */}
-                                <div>
-                                  <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase">
-                                    Input:
-                                  </span>
-                                  <p className="text-sm text-zinc-700 dark:text-zinc-300 mt-1">
-                                    {result.input}
-                                  </p>
-                                </div>
-
-                                {/* Expected */}
-                                {result.expected && (
+                                  {/* Input */}
                                   <div>
                                     <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase">
-                                      Expected Output:
+                                      Input:
                                     </span>
-                                    <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1 italic">
-                                      {result.expected}
+                                    <p className="text-sm text-zinc-700 dark:text-zinc-300 mt-1">
+                                      {result.input}
                                     </p>
                                   </div>
-                                )}
 
-                                {/* Actual Output */}
-                                <div>
-                                  <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase">
-                                    Actual Output:
-                                  </span>
-                                  <p className="text-sm text-zinc-700 dark:text-zinc-300 mt-1 bg-zinc-50 dark:bg-zinc-800 p-3 rounded border border-zinc-200 dark:border-zinc-700">
-                                    {result.output || "No output"}
-                                  </p>
-                                </div>
+                                  {/* Expected */}
+                                  {result.expected && (
+                                    <div>
+                                      <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase">
+                                        Expected Output:
+                                      </span>
+                                      <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-1 italic">
+                                        {result.expected}
+                                      </p>
+                                    </div>
+                                  )}
 
-                                {/* Metadata */}
-                                {result.metadata && (
-                                  <div className="flex flex-wrap gap-2">
-                                    {result.metadata.expectedTone && (
-                                      <span className="text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 px-2 py-1 rounded">
-                                        Tone: {result.metadata.expectedTone}
-                                      </span>
-                                    )}
-                                    {result.metadata.expectsJSON && (
-                                      <span className="text-xs bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-1 rounded">
-                                        Expects JSON
-                                      </span>
-                                    )}
+                                  {/* Actual Output */}
+                                  <div>
+                                    <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase">
+                                      Actual Output:
+                                    </span>
+                                    <p className="text-sm text-zinc-700 dark:text-zinc-300 mt-1 bg-zinc-50 dark:bg-zinc-800 p-3 rounded border border-zinc-200 dark:border-zinc-700">
+                                      {result.output || "No output"}
+                                    </p>
                                   </div>
-                                )}
-                              </div>
-                            </details>
-                          );
-                        })}
+
+                                  {/* Metadata */}
+                                  {result.metadata && (
+                                    <div className="flex flex-wrap gap-2">
+                                      {result.metadata.expectedTone && (
+                                        <span className="text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 px-2 py-1 rounded">
+                                          Tone: {result.metadata.expectedTone}
+                                        </span>
+                                      )}
+                                      {result.metadata.expectsJSON && (
+                                        <span className="text-xs bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-1 rounded">
+                                          Expects JSON
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              </details>
+                            );
+                          })}
+                        </div>
                       </div>
-                    </div>
                     )}
 
                     {/* Improved Prompt Suggestions */}
-                    {braintrustEvaluation && braintrustEvaluation.improvedPrompts &&
+                    {braintrustEvaluation &&
+                      braintrustEvaluation.improvedPrompts &&
                       braintrustEvaluation.improvedPrompts.length > 0 && (
                         <div className="bg-gradient-to-br from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 rounded-lg p-6 border border-purple-200 dark:border-purple-800">
                           <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50 mb-4 flex items-center gap-2">
@@ -1117,13 +1121,13 @@ export default function Home() {
                           </div>
                         </div>
                       )}
-                    </div>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
-            </>
-          )}
-        </main>
-      </div>
-    );
-  }
+            </div>
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
