@@ -548,7 +548,7 @@ async function createFailureDataset(
           failureReason: failure.failureReason,
           rubricResults: failure.rubricResults,
         },
-        datasetId: dataset.id,
+        dataset_id: dataset.id,
       });
     }
   } catch (error) {
