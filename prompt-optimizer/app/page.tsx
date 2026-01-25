@@ -27,7 +27,7 @@ interface TestResult {
     expectedTone?: string;
     expectsJSON?: boolean;
     category?: string;
-    [key: string]: any;
+    [key: string]: unknown;
   };
 }
 
@@ -62,7 +62,7 @@ interface PromptEvaluation {
     failed_assertions: number;
   };
   improvedPrompts?: ImprovedPrompt[];
-  syntheticDataset?: any[];
+  syntheticDataset?: unknown[];
   braintrust_enabled?: boolean;
 }
 
@@ -99,7 +99,7 @@ export default function Home() {
     null
   );
   const [dataset, setDataset] = useState<string>("general");
-  const [langsmithPrompts, setLangsmithPrompts] = useState<any[]>([]);
+  const [langsmithPrompts, setLangsmithPrompts] = useState<unknown[]>([]);
   const [isLoadingPrompts, setIsLoadingPrompts] = useState(false);
   const [showOptimizeModal, setShowOptimizeModal] = useState(false);
   const [optimizeGoal, setOptimizeGoal] = useState("");
@@ -735,7 +735,7 @@ Your response:`,
                           </h3>
                           <div className="max-h-96 overflow-y-auto font-mono text-sm space-y-1">
                             {langsmithOptimization.logs.map(
-                              (log: any, idx: number) => (
+                              (log: ProcessLog, idx: number) => (
                                 <div key={idx} className="text-zinc-300">
                                   <span className="text-zinc-500">
                                     [

@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
     ]);
 
     // Convert to array - listPrompts may return an iterator or object
-    let promptsArray: any[] = [];
+    let promptsArray: unknown[] = [];
     if (promptsResponse) {
       if (Array.isArray(promptsResponse)) {
         promptsArray = promptsResponse;
@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
         // Handle async iterator with limit to prevent infinite loops
         let count = 0;
         const maxItems = limit || 100;
-        for await (const prompt of promptsResponse as any) {
+        for await (const prompt of promptsResponse as AsyncIterable<unknown>) {
           if (count >= maxItems) break;
           promptsArray.push(prompt);
           count++;
@@ -54,8 +54,10 @@ export async function GET(request: NextRequest) {
         "prompts" in promptsResponse
       ) {
         // Handle object with prompts property
-        promptsArray = Array.isArray((promptsResponse as any).prompts)
-          ? (promptsResponse as any).prompts
+        promptsArray = Array.isArray(
+          (promptsResponse as { prompts: unknown }).prompts
+        )
+          ? (promptsResponse as { prompts: unknown[] }).prompts
           : [];
       }
     }
