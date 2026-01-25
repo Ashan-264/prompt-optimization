@@ -17,13 +17,10 @@ export async function GET(request: NextRequest) {
     // Get query parameters
     const searchParams = request.nextUrl.searchParams;
     const limit = parseInt(searchParams.get("limit") || "20");
-    const offset = parseInt(searchParams.get("offset") || "0");
 
     // Fetch prompts from LangSmith with timeout
-    const promptsPromise = langsmithClient.listPrompts({
-      limit,
-      offset,
-    });
+    // Note: listPrompts doesn't accept limit/offset, we'll handle pagination client-side
+    const promptsPromise = langsmithClient.listPrompts();
 
     // Add timeout to prevent hanging
     const timeoutPromise = new Promise((_, reject) =>
