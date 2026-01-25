@@ -36,7 +36,8 @@ export async function GET(request: NextRequest) {
     ]);
 
     // Convert to array - listPrompts may return an iterator or object
-    let promptsArray: unknown[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let promptsArray: any[] = [];
     if (promptsResponse) {
       if (Array.isArray(promptsResponse)) {
         promptsArray = promptsResponse;
@@ -44,7 +45,8 @@ export async function GET(request: NextRequest) {
         // Handle async iterator with limit to prevent infinite loops
         let count = 0;
         const maxItems = limit || 100;
-        for await (const prompt of promptsResponse as AsyncIterable<unknown>) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for await (const prompt of promptsResponse as AsyncIterable<any>) {
           if (count >= maxItems) break;
           promptsArray.push(prompt);
           count++;
@@ -54,10 +56,12 @@ export async function GET(request: NextRequest) {
         "prompts" in promptsResponse
       ) {
         // Handle object with prompts property
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         promptsArray = Array.isArray(
-          (promptsResponse as { prompts: unknown }).prompts
+          (promptsResponse as { prompts: any }).prompts
         )
-          ? (promptsResponse as { prompts: unknown[] }).prompts
+          ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (promptsResponse as { prompts: any[] }).prompts
           : [];
       }
     }

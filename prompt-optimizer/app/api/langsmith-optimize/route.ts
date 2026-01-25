@@ -549,7 +549,7 @@ async function createFailureDataset(
           rubricResults: failure.rubricResults,
         },
         datasetId: dataset.id,
-      } as unknown);
+      });
     }
   } catch (error) {
     console.error("Failed to create dataset:", error);

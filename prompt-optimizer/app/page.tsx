@@ -27,7 +27,7 @@ interface TestResult {
     expectedTone?: string;
     expectsJSON?: boolean;
     category?: string;
-    [key: string]: unknown;
+    [key: string]: string | number | boolean | undefined;
   };
 }
 
@@ -42,6 +42,18 @@ interface ProcessLog {
   step: string;
   status: "running" | "completed" | "error";
   details?: string;
+}
+
+interface LangSmithPrompt {
+  name?: string;
+  description?: string;
+  prompt?: string;
+  manifest?: {
+    prompt?: string;
+  };
+  created_at: string;
+  is_public?: boolean;
+  tags?: string[];
 }
 
 interface PromptEvaluation {
@@ -62,7 +74,7 @@ interface PromptEvaluation {
     failed_assertions: number;
   };
   improvedPrompts?: ImprovedPrompt[];
-  syntheticDataset?: unknown[];
+  syntheticDataset?: Record<string, string | number>[];
   braintrust_enabled?: boolean;
 }
 
@@ -99,7 +111,9 @@ export default function Home() {
     null
   );
   const [dataset, setDataset] = useState<string>("general");
-  const [langsmithPrompts, setLangsmithPrompts] = useState<unknown[]>([]);
+  const [langsmithPrompts, setLangsmithPrompts] = useState<LangSmithPrompt[]>(
+    []
+  );
   const [isLoadingPrompts, setIsLoadingPrompts] = useState(false);
   const [showOptimizeModal, setShowOptimizeModal] = useState(false);
   const [optimizeGoal, setOptimizeGoal] = useState("");
