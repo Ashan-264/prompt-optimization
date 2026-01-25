@@ -511,8 +511,8 @@ const logToLangSmith = traceable(
     output: string,
     judgeResult: {
       score: number;
-      failureReason: string;
-      rubricResults: Record<string, number>;
+      failureReason?: string;
+      rubricResults: { criterion: string; passed: boolean; reason?: string }[];
     }
   ) => {
     return {
