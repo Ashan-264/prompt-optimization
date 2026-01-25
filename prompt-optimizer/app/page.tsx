@@ -39,7 +39,7 @@ interface ImprovedPrompt {
 
 interface ProcessLog {
   timestamp: string;
-  step: string;
+  phase: string;
   status: "running" | "completed" | "error";
   details?: string;
 }
@@ -950,7 +950,8 @@ Your response:`,
                                 </span>
                               </div>
                               <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-                                Score: {(result.score * 10).toFixed(1)}/10
+                                Score: {((result.score ?? 0) * 10).toFixed(1)}
+                                /10
                               </span>
                             </div>
                             <div className="ml-7 space-y-2">
@@ -994,7 +995,7 @@ Your response:`,
                       <div className="grid grid-cols-3 gap-4">
                         <div>
                           <div className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
-                            {evaluation.stats.total_assertions}
+                            {evaluation.stats?.total_assertions ?? 0}
                           </div>
                           <div className="text-sm text-zinc-600 dark:text-zinc-400">
                             Total Assertions
@@ -1002,7 +1003,7 @@ Your response:`,
                         </div>
                         <div>
                           <div className="text-2xl font-bold text-green-600 dark:text-green-400">
-                            {evaluation.stats.passed_assertions}
+                            {evaluation.stats?.passed_assertions ?? 0}
                           </div>
                           <div className="text-sm text-zinc-600 dark:text-zinc-400">
                             Passed
@@ -1010,7 +1011,7 @@ Your response:`,
                         </div>
                         <div>
                           <div className="text-2xl font-bold text-red-600 dark:text-red-400">
-                            {evaluation.stats.failed_assertions}
+                            {evaluation.stats?.failed_assertions ?? 0}
                           </div>
                           <div className="text-sm text-zinc-600 dark:text-zinc-400">
                             Failed
@@ -1061,7 +1062,7 @@ Your response:`,
                               </span>
                               <span>
                                 <span className="font-semibold">
-                                  {log.step}
+                                  {log.phase}
                                 </span>
                                 {log.details && (
                                   <span className="text-zinc-500 dark:text-zinc-400">
