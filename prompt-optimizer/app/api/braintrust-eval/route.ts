@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import Groq from "groq-sdk";
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
 
 interface TestCase {
   input: string;
@@ -46,33 +50,50 @@ PROMPT TO ANALYZE:
 ${prompt}
 
 INSTRUCTIONS:
-1. Identify what the prompt is asking for (questions, summaries, creative writing, etc.)
-2. Extract any tone requirements from the prompt (professional, casual, formal, etc.)
-3. Determine if JSON output is expected
-4. Create 5 diverse test cases that would thoroughly test this prompt
+1. Identify the prompt type:
+   - FACTUAL: Questions with verifiable answers (e.g., "What is photosynthesis?")
+   - RECOMMENDATION: Requests for suggestions, lists, or options (e.g., "Suggest MTB trails", "Recommend restaurants")
+   - CREATIVE: Story writing, poetry, creative content
+   - TRANSFORMATION: Data processing, format conversion
+
+2. For RECOMMENDATION prompts:
+   - Expected output should describe CRITERIA, not specific items
+   - Example: "Should provide 3-5 trail options with difficulty levels, locations, and brief descriptions"
+   - NOT: "Should mention Trail X in Location Y"
+   - Focus on structure, completeness, and helpfulness
+
+3. For FACTUAL prompts:
+   - Expected output should have verifiable facts
+   - Can be specific about correct information
+
+4. For CREATIVE prompts:
+   - Expected output should describe quality attributes
+   - Example: "Should be engaging, descriptive, and grammatically correct"
 
 Return a JSON array with EXACTLY this schema:
 [
   {
     "input": "The variable part that replaces {{input}} in the prompt",
-    "expected": "A golden example of what a perfect answer should look like",
+    "expected": "For recommendations: describe what good output should CONTAIN (not specific answers). For facts: provide correct answer. For creative: describe quality criteria.",
     "metadata": {
       "expectedTone": "professional|casual|formal|friendly|etc (extract from prompt)",
       "expectsJSON": true|false,
       "minLength": <number>,
       "mustContain": ["keyword1", "keyword2"],
-      "category": "factual|creative|analytical|etc"
+      "category": "factual|recommendation|creative|transformation",
+      "promptType": "factual|recommendation|creative|transformation"
     }
   }
 ]
 
 IMPORTANT:
+- Set category and promptType correctly based on prompt analysis
+- For recommendations, expected should be criteria-based
 - Make test cases diverse and challenging
-- Expected output should be realistic and high-quality
 - Extract tone from the original prompt context
 - Set expectsJSON to true only if prompt explicitly asks for JSON
 
-Return ONLY the JSON array, no explanation.`;
+Return ONLY the JSON array with 5 test cases, no explanation.`;
 
   try {
     const result = await model.generateContent(generationPrompt);
@@ -86,9 +107,33 @@ Return ONLY the JSON array, no explanation.`;
 
     const testCases = JSON.parse(jsonMatch[0]);
     return testCases;
-  } catch (error) {
-    console.error("Gemini generation error:", error);
-    throw new Error("Failed to generate synthetic dataset");
+  } catch (geminiError) {
+    console.warn("Gemini failed, falling back to Groq Llama:", geminiError);
+
+    // Fallback to Groq Llama
+    const completion = await groq.chat.completions.create({
+      messages: [
+        {
+          role: "user",
+          content: generationPrompt,
+        },
+      ],
+      model: "llama-3.3-70b-versatile",
+      temperature: 0.7,
+      max_tokens: 2000,
+    });
+
+    const response = completion.choices[0]?.message?.content || "";
+    const jsonMatch = response.match(/\[[\s\S]*\]/);
+
+    if (!jsonMatch) {
+      throw new Error(
+        "Failed to generate synthetic dataset with both Gemini and Groq"
+      );
+    }
+
+    const testCases = JSON.parse(jsonMatch[0]);
+    return testCases;
   }
 }
 
@@ -139,12 +184,53 @@ Answer with ONLY "1" for yes or "0" for no.`;
   }
 }
 
-// Custom factuality scorer using Claude
+// Custom factuality scorer using Claude (context-aware)
 async function scoreFactuality(
   output: string,
-  expected: string
+  expected: string,
+  metadata?: TestCase["metadata"]
 ): Promise<number> {
-  const factualityPrompt = `Is this output factually consistent with the expected answer?
+  const promptType = metadata?.promptType || metadata?.category || "factual";
+
+  let factualityPrompt = "";
+
+  if (promptType === "recommendation") {
+    // For recommendations, just check if output is on-topic and contains the right type of info
+    factualityPrompt = `Simple yes/no: Does this output provide relevant recommendations/information that addresses the request?
+
+OUTPUT:
+${output}
+
+REQUEST TYPE:
+${expected}
+
+If the output:
+- Is on-topic and relevant
+- Provides specific examples/recommendations
+- Contains details and explanations
+
+Then answer "1"
+
+Only answer "0" if output is:
+- Completely off-topic
+- Just says "I don't know" or refuses
+- Provides no actual information
+
+Answer ONLY with "1" or "0":`;
+  } else if (promptType === "creative") {
+    // For creative content, check if it's coherent and relevant
+    factualityPrompt = `Evaluate if this creative output meets the quality criteria.
+
+OUTPUT:
+${output}
+
+QUALITY CRITERIA:
+${expected}
+
+Return "1" if output is coherent, relevant, and meets the quality bar, "0" if it's off-topic or poor quality.`;
+  } else {
+    // For factual content, check accuracy
+    factualityPrompt = `Is this output factually consistent with the expected answer?
 
 OUTPUT:
 ${output}
@@ -153,11 +239,12 @@ EXPECTED:
 ${expected}
 
 Return "1" if factually consistent/correct, "0" if not.`;
+  }
 
   try {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 10,
+      max_tokens: 50,
       messages: [{ role: "user", content: factualityPrompt }],
     });
 
@@ -166,33 +253,72 @@ Return "1" if factually consistent/correct, "0" if not.`;
       textContent && textContent.type === "text"
         ? textContent.text.trim()
         : "0";
-    return response === "1" ? 1 : 0;
+
+    // Extract the last "1" or "0" from the response
+    const match = response.match(/[01]/g);
+    const lastDigit = match ? match[match.length - 1] : "0";
+
+    return lastDigit === "1" ? 1 : 0;
   } catch (error) {
     console.error("Factuality scoring error:", error);
     return 0;
   }
 }
 
-// Custom battle scorer using Claude (compare output vs expected)
+// Custom battle scorer using Claude (focus on quality, not just similarity)
 async function scoreBattle(
   input: string,
   output: string,
-  expected: string
+  expected: string,
+  metadata?: TestCase["metadata"]
 ): Promise<number> {
-  const battlePrompt = `Given this input question, which answer is better?
+  const promptType = metadata?.promptType || metadata?.category || "factual";
+
+  let battlePrompt = "";
+
+  if (promptType === "recommendation") {
+    // For recommendations, just check if it's helpful
+    battlePrompt = `Simple yes/no: Is this response helpful and adequate?
+
+USER REQUEST:
+${input}
+
+RESPONSE:
+${output}
+
+If the response:
+- Directly addresses the request
+- Provides specific, useful information
+- Has reasonable detail
+
+Then answer "1"
+
+Only answer "0" if response:
+- Is off-topic or irrelevant
+- Is extremely vague ("there are many options")
+- Refuses to help or provides no real information
+
+Answer ONLY with "1" or "0":`;
+  } else {
+    // For factual/creative, compare quality
+    battlePrompt = `Compare these two responses for quality and helpfulness.
 
 INPUT: ${input}
 
-ANSWER A: ${output}
+RESPONSE A (Actual): ${output}
 
-ANSWER B (EXPECTED): ${expected}
+RESPONSE B (Reference): ${expected}
 
-Return "1" if Answer A is as good or better than Answer B, "0" if Answer B is clearly better.`;
+Evaluate: Is Response A at least as good as Response B in terms of accuracy, completeness, and helpfulness?
+Different but equally valid approaches should pass.
+
+Return "1" if A is as good or better, "0" only if B is clearly superior.`;
+  }
 
   try {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 10,
+      max_tokens: 50,
       messages: [{ role: "user", content: battlePrompt }],
     });
 
@@ -201,7 +327,12 @@ Return "1" if Answer A is as good or better than Answer B, "0" if Answer B is cl
       textContent && textContent.type === "text"
         ? textContent.text.trim()
         : "0";
-    return response === "1" ? 1 : 0;
+
+    // Extract the last "1" or "0" from the response
+    const match = response.match(/[01]/g);
+    const lastDigit = match ? match[match.length - 1] : "0";
+
+    return lastDigit === "1" ? 1 : 0;
   } catch (error) {
     console.error("Battle scoring error:", error);
     return 0;
@@ -223,13 +354,18 @@ async function evaluateTestCase(
 
   try {
     // 1. Factuality Score (checks if output is factually consistent with expected)
-    scores.factuality = await scoreFactuality(output, testCase.expected);
+    scores.factuality = await scoreFactuality(
+      output,
+      testCase.expected,
+      testCase.metadata
+    );
 
     // 2. Battle Score (compare output vs expected)
     scores.battle = await scoreBattle(
       testCase.input,
       output,
-      testCase.expected
+      testCase.expected,
+      testCase.metadata
     );
 
     // 3. JSON Validity Score

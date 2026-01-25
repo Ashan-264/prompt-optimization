@@ -13,6 +13,7 @@
     "@google/generative-ai": "^0.24.1",
     "autoevals": "^0.0.131",
     "braintrust": "^1.1.1",
+    "groq-sdk": "^0.37.0",
     "langsmith": "^0.4.4",
     "next": "16.1.1",
     "react": "19.2.3",
