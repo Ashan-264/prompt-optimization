@@ -118,7 +118,7 @@ Return ONLY the JSON array with 5 test cases, no explanation.`;
           content: generationPrompt,
         },
       ],
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-20b",
       temperature: 0.7,
       max_tokens: 2000,
     });
@@ -142,7 +142,7 @@ async function runPrompt(prompt: string, input: string): Promise<string> {
   const formattedPrompt = prompt.replace(/\{\{input\}\}/g, input);
 
   const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-5",
     max_tokens: 2048,
     messages: [{ role: "user", content: formattedPrompt }],
   });
@@ -167,7 +167,7 @@ Answer with ONLY "1" for yes or "0" for no.`;
 
   try {
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-5",
       max_tokens: 10,
       messages: [{ role: "user", content: tonePrompt }],
     });
@@ -243,7 +243,7 @@ Return "1" if factually consistent/correct, "0" if not.`;
 
   try {
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-5",
       max_tokens: 50,
       messages: [{ role: "user", content: factualityPrompt }],
     });
@@ -317,7 +317,7 @@ Return "1" if A is as good or better, "0" only if B is clearly superior.`;
 
   try {
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-5",
       max_tokens: 50,
       messages: [{ role: "user", content: battlePrompt }],
     });
@@ -441,7 +441,7 @@ Return ONLY the JSON array.`;
 
   try {
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-5",
       max_tokens: 2048,
       messages: [{ role: "user", content: improvementPrompt }],
     });

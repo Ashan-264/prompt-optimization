@@ -393,7 +393,7 @@ Return ONLY a JSON array:
           content: generationPrompt,
         },
       ],
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-20b",
       temperature: 0.7,
       max_tokens: 2000,
     });
@@ -437,7 +437,7 @@ async function executePromptWithGemini(
           content: formattedPrompt,
         },
       ],
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-20b",
       temperature: 0.7,
       max_tokens: 2000,
     });
@@ -482,7 +482,7 @@ Return ONLY valid JSON:
 }`;
 
   const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-5",
     max_tokens: 500,
     messages: [{ role: "user", content: judgePrompt }],
   });
@@ -604,7 +604,7 @@ Return ONLY valid JSON:
 }`;
 
   const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-5",
     max_tokens: 2000,
     messages: [{ role: "user", content: optimizationPrompt }],
   });

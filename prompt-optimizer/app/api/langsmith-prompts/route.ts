@@ -53,9 +53,8 @@ export async function GET(request: NextRequest) {
         "prompts" in promptsResponse
       ) {
         // Handle object with prompts property
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         promptsArray = Array.isArray(
-          (promptsResponse as { prompts: any }).prompts
+          (promptsResponse as { prompts: unknown }).prompts
         )
           ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (promptsResponse as { prompts: any[] }).prompts

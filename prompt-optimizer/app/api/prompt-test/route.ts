@@ -39,7 +39,7 @@ async function runClaudePrompt(prompt: string, input: string): Promise<string> {
   const formattedPrompt = prompt.replace(/\{\{input\}\}/g, input);
 
   const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-5",
     max_tokens: 1024,
     messages: [{ role: "user", content: formattedPrompt }],
   });
@@ -70,7 +70,7 @@ Return ONLY a JSON object in this format:
 {"score": <number 0-1>, "passed": <boolean>, "feedback": "<brief explanation>"}`;
 
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-5",
       max_tokens: 512,
       messages: [{ role: "user", content: evaluationPrompt }],
     });

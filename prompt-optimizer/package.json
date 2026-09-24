@@ -15,9 +15,9 @@
     "braintrust": "^1.1.1",
     "groq-sdk": "^0.37.0",
     "langsmith": "^0.4.4",
-    "next": "16.1.1",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
+    "next": "16.3.6",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "uuid": "^13.0.0"
   },
   "devDependencies": {
@@ -27,7 +27,7 @@
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",
     "eslint": "^9",
-    "eslint-config-next": "16.1.1",
+    "eslint-config-next": "16.3.6",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

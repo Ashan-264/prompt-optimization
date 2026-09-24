@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
 
     // Step 1: Get the initial AI response
     const initialMessage = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-5",
       max_tokens: 2048,
       messages: [{ role: "user", content: prompt }],
     });
@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
     const judgePrompt = JUDGE_PROMPT.replace("{output_text}", aiOutput);
 
     const judgeMessage = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-5",
       max_tokens: 1024,
       messages: [{ role: "user", content: judgePrompt }],
     });
