@@ -1,24 +1,50 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest, NextResponse } from "next/server";
+import {
+  CLAUDE_MODEL,
+  NO_THINKING,
+  getAnthropic,
+} from "../../lib/llm";
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (typeof value !== "object" || value === null) return false;
+  const message = value as Record<string, unknown>;
+  return (
+    (message.role === "user" || message.role === "assistant") &&
+    typeof message.content === "string" &&
+    message.content.length > 0
+  );
+}
 
 export async function POST(request: NextRequest) {
   try {
     const { messages } = await request.json();
 
-    if (!messages || !Array.isArray(messages)) {
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return NextResponse.json(
         { error: "Messages array is required" },
         { status: 400 }
       );
     }
 
-    const stream = await anthropic.messages.stream({
-      model: "claude-sonnet-4-20250514",
+    if (!messages.every(isChatMessage)) {
+      return NextResponse.json(
+        {
+          error:
+            "Each message must have a role of 'user' or 'assistant' and non-empty string content",
+        },
+        { status: 400 }
+      );
+    }
+
+    const stream = getAnthropic().messages.stream({
+      model: CLAUDE_MODEL,
       max_tokens: 1024,
+      thinking: NO_THINKING,
       messages: messages,
     });
 
@@ -43,6 +69,10 @@ export async function POST(request: NextRequest) {
           controller.error(error);
         }
       },
+      // Stop generating (and billing) when the browser goes away mid-response.
+      cancel() {
+        stream.abort();
+      },
     });
 
     return new Response(readable, {
@@ -55,7 +85,10 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Error in chat API:", error);
     return NextResponse.json(
-      { error: "Failed to process request" },
+      {
+        error: "Failed to process request",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
       { status: 500 }
     );
   }

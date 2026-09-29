@@ -1,16 +1,16 @@
-import { NextRequest, NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
+import { NextRequest } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import Groq from "groq-sdk";
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+import {
+  CLAUDE_MODEL,
+  NO_THINKING,
+  fillPrompt,
+  getAnthropic,
+  getGroq,
+  messageText,
+  parseJsonBlock,
+} from "../../lib/llm";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
 
 interface TestCase {
   input: string;
@@ -36,6 +36,33 @@ interface TestResult {
     overall: number;
   };
   metadata?: TestCase["metadata"];
+}
+
+// The generator models are free-form, so anything missing the fields the rest
+// of the pipeline reads (input.substring, expected, metadata lookups) has to be
+// dropped here rather than crashing the run mid-way.
+function normalizeTestCases(value: unknown): TestCase[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((entry): TestCase[] => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const candidate = entry as Record<string, unknown>;
+    if (typeof candidate.input !== "string" || !candidate.input.trim()) {
+      return [];
+    }
+
+    return [
+      {
+        input: candidate.input,
+        expected:
+          typeof candidate.expected === "string" ? candidate.expected : "",
+        metadata:
+          typeof candidate.metadata === "object" && candidate.metadata !== null
+            ? (candidate.metadata as TestCase["metadata"])
+            : undefined,
+      },
+    ];
+  });
 }
 
 // Generate synthetic test cases using Gemini
@@ -100,18 +127,25 @@ Return ONLY the JSON array with 5 test cases, no explanation.`;
     const response = result.response.text();
 
     // Extract JSON from response
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
+    const testCases = normalizeTestCases(
+      parseJsonBlock<unknown>(response, "array")
+    );
+    if (testCases.length === 0) {
       throw new Error("Failed to parse Gemini response as JSON");
     }
 
-    const testCases = JSON.parse(jsonMatch[0]);
     return testCases;
   } catch (geminiError) {
     console.warn("Gemini failed, falling back to Groq Llama:", geminiError);
 
+    if (!process.env.GROQ_API_KEY) {
+      throw new Error(
+        "Failed to generate synthetic dataset with Gemini, and GROQ_API_KEY is not configured for fallback"
+      );
+    }
+
     // Fallback to Groq Llama
-    const completion = await groq.chat.completions.create({
+    const completion = await getGroq().chat.completions.create({
       messages: [
         {
           role: "user",
@@ -124,31 +158,54 @@ Return ONLY the JSON array with 5 test cases, no explanation.`;
     });
 
     const response = completion.choices[0]?.message?.content || "";
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    const testCases = normalizeTestCases(
+      parseJsonBlock<unknown>(response, "array")
+    );
 
-    if (!jsonMatch) {
+    if (testCases.length === 0) {
       throw new Error(
         "Failed to generate synthetic dataset with both Gemini and Groq"
       );
     }
 
-    const testCases = JSON.parse(jsonMatch[0]);
     return testCases;
   }
 }
 
 // Run prompt with Claude
 async function runPrompt(prompt: string, input: string): Promise<string> {
-  const formattedPrompt = prompt.replace(/\{\{input\}\}/g, input);
-
-  const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+  const message = await getAnthropic().messages.create({
+    model: CLAUDE_MODEL,
     max_tokens: 2048,
-    messages: [{ role: "user", content: formattedPrompt }],
+    thinking: NO_THINKING,
+    messages: [{ role: "user", content: fillPrompt(prompt, input) }],
   });
 
-  const textContent = message.content.find((block) => block.type === "text");
-  return textContent && textContent.type === "text" ? textContent.text : "";
+  return messageText(message);
+}
+
+// Asks the judge for a bare "1" or "0" and reads the last digit it emitted.
+async function scoreBinary(
+  judgePrompt: string,
+  label: string
+): Promise<number> {
+  try {
+    const message = await getAnthropic().messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 50,
+      thinking: NO_THINKING,
+      messages: [{ role: "user", content: judgePrompt }],
+    });
+
+    const response = messageText(message).trim();
+    const match = response.match(/[01]/g);
+    const lastDigit = match ? match[match.length - 1] : "0";
+
+    return lastDigit === "1" ? 1 : 0;
+  } catch (error) {
+    console.error(`${label} scoring error:`, error);
+    return 0;
+  }
 }
 
 // Custom tone scorer using Claude
@@ -158,30 +215,15 @@ async function scoreTone(
 ): Promise<number> {
   if (!expectedTone) return 1; // Pass if no tone specified
 
-  const tonePrompt = `Does this text have a ${expectedTone} tone?
+  return scoreBinary(
+    `Does this text have a ${expectedTone} tone?
 
 TEXT:
 ${output}
 
-Answer with ONLY "1" for yes or "0" for no.`;
-
-  try {
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 10,
-      messages: [{ role: "user", content: tonePrompt }],
-    });
-
-    const textContent = message.content.find((block) => block.type === "text");
-    const response =
-      textContent && textContent.type === "text"
-        ? textContent.text.trim()
-        : "0";
-    return response === "1" ? 1 : 0;
-  } catch (error) {
-    console.error("Tone scoring error:", error);
-    return 0;
-  }
+Answer with ONLY "1" for yes or "0" for no.`,
+    "Tone"
+  );
 }
 
 // Custom factuality scorer using Claude (context-aware)
@@ -241,28 +283,7 @@ ${expected}
 Return "1" if factually consistent/correct, "0" if not.`;
   }
 
-  try {
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 50,
-      messages: [{ role: "user", content: factualityPrompt }],
-    });
-
-    const textContent = message.content.find((block) => block.type === "text");
-    const response =
-      textContent && textContent.type === "text"
-        ? textContent.text.trim()
-        : "0";
-
-    // Extract the last "1" or "0" from the response
-    const match = response.match(/[01]/g);
-    const lastDigit = match ? match[match.length - 1] : "0";
-
-    return lastDigit === "1" ? 1 : 0;
-  } catch (error) {
-    console.error("Factuality scoring error:", error);
-    return 0;
-  }
+  return scoreBinary(factualityPrompt, "Factuality");
 }
 
 // Custom battle scorer using Claude (focus on quality, not just similarity)
@@ -315,28 +336,7 @@ Different but equally valid approaches should pass.
 Return "1" if A is as good or better, "0" only if B is clearly superior.`;
   }
 
-  try {
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 50,
-      messages: [{ role: "user", content: battlePrompt }],
-    });
-
-    const textContent = message.content.find((block) => block.type === "text");
-    const response =
-      textContent && textContent.type === "text"
-        ? textContent.text.trim()
-        : "0";
-
-    // Extract the last "1" or "0" from the response
-    const match = response.match(/[01]/g);
-    const lastDigit = match ? match[match.length - 1] : "0";
-
-    return lastDigit === "1" ? 1 : 0;
-  } catch (error) {
-    console.error("Battle scoring error:", error);
-    return 0;
-  }
+  return scoreBinary(battlePrompt, "Battle");
 }
 
 // Run evaluation with custom Claude-based scorers
@@ -386,14 +386,14 @@ async function evaluateTestCase(
     } else {
       scores.tone = 1; // Pass if no tone specified
     }
-
-    // Overall score (average of all scores)
-    scores.overall =
-      (scores.factuality + scores.battle + scores.jsonValidity + scores.tone) /
-      4;
   } catch (error) {
     console.error("Evaluation error:", error);
   }
+
+  // Computed outside the try so a partially scored test still reports an
+  // overall consistent with the individual scores above it.
+  scores.overall =
+    (scores.factuality + scores.battle + scores.jsonValidity + scores.tone) / 4;
 
   return scores;
 }
@@ -440,22 +440,35 @@ Return a JSON array:
 Return ONLY the JSON array.`;
 
   try {
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+    const message = await getAnthropic().messages.create({
+      model: CLAUDE_MODEL,
       max_tokens: 2048,
+      thinking: NO_THINKING,
       messages: [{ role: "user", content: improvementPrompt }],
     });
 
-    const textContent = message.content.find((block) => block.type === "text");
-    const response =
-      textContent && textContent.type === "text" ? textContent.text : "";
+    const suggestions = parseJsonBlock<unknown>(messageText(message), "array");
+    if (!Array.isArray(suggestions)) return [];
 
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
+    // The UI renders improved.fixes.map(...) and both text fields directly.
+    return suggestions.flatMap((entry) => {
+      if (typeof entry !== "object" || entry === null) return [];
+      const candidate = entry as Record<string, unknown>;
+      if (typeof candidate.prompt !== "string") return [];
 
-    return [];
+      return [
+        {
+          prompt: candidate.prompt,
+          reasoning:
+            typeof candidate.reasoning === "string" ? candidate.reasoning : "",
+          fixes: Array.isArray(candidate.fixes)
+            ? candidate.fixes.filter(
+                (fix): fix is string => typeof fix === "string"
+              )
+            : [],
+        },
+      ];
+    });
   } catch (error) {
     console.error("Improvement generation error:", error);
     return [];
@@ -467,9 +480,11 @@ export async function POST(request: NextRequest) {
   const body = await request.json();
   const { prompt } = body;
 
+  // "phase" rather than "step": the UI renders log.phase, so the old key left
+  // every Braintrust log line without its step name.
   const logs: Array<{
     timestamp: string;
-    step: string;
+    phase: string;
     status: "running" | "completed" | "error";
     details?: string;
   }> = [];
@@ -479,23 +494,47 @@ export async function POST(request: NextRequest) {
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
 
+  // Once the browser disconnects, every write rejects. Without this guard the
+  // failure inside the catch block became an unhandled rejection.
+  let streamClosed = false;
+
+  const send = async (payload: unknown) => {
+    if (streamClosed) return;
+    try {
+      await writer.write(
+        encoder.encode(`data: ${JSON.stringify(payload)}\n\n`)
+      );
+    } catch (error) {
+      streamClosed = true;
+      console.warn("SSE client disconnected:", error);
+    }
+  };
+
+  const closeStream = async () => {
+    if (streamClosed) return;
+    streamClosed = true;
+    try {
+      await writer.close();
+    } catch {
+      // Already closed or aborted by the client.
+    }
+  };
+
   const sendLog = async (
-    step: string,
+    phase: string,
     status: "running" | "completed" | "error",
     details?: string
   ) => {
     const log = {
       timestamp: new Date().toISOString(),
-      step,
+      phase,
       status,
       details,
     };
     logs.push(log);
 
     // Send log as SSE
-    await writer.write(
-      encoder.encode(`data: ${JSON.stringify({ type: "log", log })}\n\n`)
-    );
+    await send({ type: "log", log });
   };
 
   // Start processing in the background
@@ -503,35 +542,27 @@ export async function POST(request: NextRequest) {
     try {
       if (!prompt || typeof prompt !== "string") {
         await sendLog("Error", "error", "Prompt string is required");
-        await writer.write(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: "error",
-              error: "Prompt string is required",
-            })}\n\n`
-          )
-        );
-        await writer.close();
+        await send({ type: "error", error: "Prompt string is required" });
+        await closeStream();
         return;
       }
 
       if (!process.env.GEMINI_API_KEY) {
         await sendLog("Error", "error", "GEMINI_API_KEY not configured");
-        await writer.write(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: "error",
-              error: "GEMINI_API_KEY not configured",
-            })}\n\n`
-          )
-        );
-        await writer.close();
+        await send({ type: "error", error: "GEMINI_API_KEY not configured" });
+        await closeStream();
+        return;
+      }
+
+      if (!process.env.ANTHROPIC_API_KEY) {
+        await sendLog("Error", "error", "ANTHROPIC_API_KEY not configured");
+        await send({ type: "error", error: "ANTHROPIC_API_KEY not configured" });
+        await closeStream();
         return;
       }
 
       // Step 1: Generate synthetic dataset with Gemini
       await sendLog("Analyzing prompt", "running");
-      console.log("Generating synthetic dataset with Gemini...");
       await sendLog(
         "Generating synthetic dataset with Gemini Flash 2.5",
         "running"
@@ -550,7 +581,6 @@ export async function POST(request: NextRequest) {
         "running",
         "Testing prompt against dataset"
       );
-      console.log("Running evaluations...");
       const results: TestResult[] = [];
 
       for (const [index, testCase] of testCases.entries()) {
@@ -600,7 +630,6 @@ export async function POST(request: NextRequest) {
           "running",
           `${failedTests.length} test(s) failed - generating improvements`
         );
-        console.log("Generating improved prompts...");
 
         improvedPrompts = await getImprovedPrompts(prompt, failedTests);
 
@@ -620,39 +649,39 @@ export async function POST(request: NextRequest) {
       // Calculate stats
       const totalTests = results.length;
       const passedTests = results.filter((r) => r.scores.overall >= 0.8).length;
+      // Guarded: an empty result set would otherwise report NaN throughout.
+      const successRate = totalTests > 0 ? (passedTests / totalTests) * 100 : 0;
       const avgScore =
-        results.reduce((sum, r) => sum + r.scores.overall, 0) / totalTests;
+        totalTests > 0
+          ? results.reduce((sum, r) => sum + r.scores.overall, 0) / totalTests
+          : 0;
 
       await sendLog(
         "Evaluation complete",
         "completed",
-        `Success rate: ${((passedTests / totalTests) * 100).toFixed(1)}%`
+        `Success rate: ${successRate.toFixed(1)}%`
       );
 
       // Send final results
-      await writer.write(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            type: "complete",
-            evaluation: {
-              prompt,
-              summary: {
-                total_tests: totalTests,
-                passed_tests: passedTests,
-                failed_tests: failedTests.length,
-                success_rate: ((passedTests / totalTests) * 100).toFixed(1),
-                average_score: (avgScore * 100).toFixed(1),
-              },
-              results,
-              improvedPrompts: improvedPrompts.slice(0, 3),
-              syntheticDataset: testCases,
-              logs,
-            },
-          })}\n\n`
-        )
-      );
+      await send({
+        type: "complete",
+        evaluation: {
+          prompt,
+          summary: {
+            total_tests: totalTests,
+            passed_tests: passedTests,
+            failed_tests: failedTests.length,
+            success_rate: successRate.toFixed(1),
+            average_score: (avgScore * 100).toFixed(1),
+          },
+          results,
+          improvedPrompts: improvedPrompts.slice(0, 3),
+          syntheticDataset: testCases,
+          logs,
+        },
+      });
 
-      await writer.close();
+      await closeStream();
     } catch (error) {
       console.error("Error in braintrust-eval API:", error);
       await sendLog(
@@ -661,19 +690,18 @@ export async function POST(request: NextRequest) {
         error instanceof Error ? error.message : "Unknown error"
       );
 
-      await writer.write(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            type: "error",
-            error: "Failed to run Braintrust evaluation",
-            details: error instanceof Error ? error.message : "Unknown error",
-            logs,
-          })}\n\n`
-        )
-      );
-      await writer.close();
+      await send({
+        type: "error",
+        error: "Failed to run Braintrust evaluation",
+        details: error instanceof Error ? error.message : "Unknown error",
+        logs,
+      });
+      await closeStream();
     }
-  })();
+  })().catch((error) => {
+    // Last resort: never let the detached task reject unhandled.
+    console.error("Unhandled braintrust-eval stream error:", error);
+  });
 
   return new Response(stream.readable, {
     headers: {

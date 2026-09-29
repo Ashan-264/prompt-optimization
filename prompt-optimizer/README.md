@@ -1,18 +1,18 @@
 # Prompt Optimizer
 
-A Next.js application for testing and optimizing AI prompts using multiple evaluation methods powered by Claude Sonnet 4.
+A Next.js application for testing and optimizing AI prompts using multiple evaluation methods powered by Claude Sonnet.
 
 ## Features
 
 ### 1. **Chat Mode**
 
-- Interactive chat interface with Claude Sonnet 4
+- Interactive chat interface with Claude Sonnet
 - Streaming responses for real-time interaction
 - Message history management
 
 ### 2. **Prompt Testing Suite**
 
-Three powerful evaluation methods:
+Four evaluation methods:
 
 #### **Dataset Tests (LangSmith Integration)**
 
@@ -21,21 +21,27 @@ Three powerful evaluation methods:
 - Optional LangSmith logging for tracing and monitoring
 - Detailed test results with pass/fail status and scoring
 
-#### **Braintrust Evaluation** 🧠 NEW
+#### **Braintrust Evaluation** 🧠
 
-- Advanced prompt evaluation with Factuality and QA Accuracy scoring
-- Compares outputs against expected answer characteristics
-- Optional Braintrust platform logging for experiment tracking
-- Dual-metric scoring system (Factuality + QA Accuracy)
+- Generates a synthetic test dataset with Gemini, then scores every case
+- Four metrics per test case: Factuality, Battle, JSON validity, and Tone
+- Suggests targeted prompt improvements for the cases that fail
+- Streams progress as the evaluation runs
+
+#### **LangSmith Optimization**
+
+- Generates a test dataset, scores it against a rubric you confirm
+- Pushes failing cases to a LangSmith dataset
+- Rewrites the prompt from the failure patterns, then A/B tests the rewrite
 
 #### **LLM Judge Evaluation**
 
 - Blind two-stage evaluation process
 - Scores prompts on 4 criteria:
-  - Clarity (0-5)
-  - Accuracy (0-5)
-  - Helpfulness (0-5)
-  - Completeness (0-5)
+  - Clarity (1-5)
+  - Accuracy (1-5)
+  - Helpfulness (1-5)
+  - Completeness (1-5)
 - Detailed reasoning for each score
 - Overall quality assessment
 
@@ -44,7 +50,8 @@ Three powerful evaluation methods:
 ### Prerequisites
 
 - Node.js 18+
-- Anthropic API key
+- Anthropic API key (plus a Gemini and LangSmith key for the dataset-generating
+  evaluations - see the environment variables below)
 
 ### Installation
 
@@ -58,12 +65,17 @@ npm install
 3. Create a `.env.local` file with your API keys:
 
 ```bash
-# Required
+# Required - every evaluation runs the prompt and/or judges it with Claude
 ANTHROPIC_API_KEY=your_anthropic_api_key
 
-# Optional - for enhanced logging and tracking
+# Required for Braintrust Eval and LangSmith Optimization (synthetic datasets)
+GEMINI_API_KEY=your_gemini_api_key            # Get from: https://aistudio.google.com/apikey
+
+# Required for LangSmith Optimization; also enables tracing for Dataset Tests
 LANGSMITH_API_KEY=your_langsmith_api_key      # Get from: https://smith.langchain.com/settings
-BRAINTRUST_API_KEY=your_braintrust_api_key    # Get from: https://www.braintrust.dev/app/settings
+
+# Optional - used only as a fallback when Gemini requests fail
+GROQ_API_KEY=your_groq_api_key                # Get from: https://console.groq.com/keys
 ```
 
 4. Run the development server:
@@ -89,8 +101,11 @@ npm run dev
 3. Enter your prompt (use `{{input}}` as a placeholder for test inputs)
 4. Choose your evaluation method:
    - **Run Dataset Tests**: Standard evaluation with LangSmith logging
-   - **Braintrust Eval**: Advanced factuality and QA accuracy scoring
-   - **LLM Judge Evaluation**: Comprehensive blind evaluation with detailed criteria
+   - **Braintrust Eval**: Synthetic dataset scored on four metrics, plus
+     suggested prompt improvements
+   - **LLM Judge**: Comprehensive blind evaluation with detailed criteria
+   - **LangSmith Optimization**: Rubric-driven rewrite of the prompt, A/B
+     tested against the original
 
 ### Example Prompt
 
@@ -101,7 +116,7 @@ You are a helpful AI assistant. Answer this question clearly and concisely: {{in
 ## Technology Stack
 
 - **Next.js 16.1.1**: React framework with App Router
-- **Anthropic SDK**: Claude Sonnet 4 API integration
+- **Anthropic SDK**: Claude API integration
 - **LangSmith**: Prompt tracing and experiment tracking
 - **Braintrust**: Advanced prompt evaluation and logging
 - **React 19.2.3**: UI framework
@@ -112,30 +127,35 @@ You are a helpful AI assistant. Answer this question clearly and concisely: {{in
 
 - `/api/chat`: Streaming chat with Claude
 - `/api/prompt-test`: Dataset-based testing with LangSmith
-- `/api/braintrust-eval`: Braintrust evaluation with dual scoring
+- `/api/braintrust-eval`: Synthetic-dataset evaluation across four metrics
 - `/api/llm-judge`: Blind LLM judge evaluation
+- `/api/langsmith-optimize`: Rubric-driven optimization with an A/B rerun
+- `/api/langsmith-prompts`: Lists prompts from the LangSmith Prompt Hub
 
 ## Evaluation Metrics
 
 ### Dataset Tests (LangSmith)
 
 - Custom Claude-based quality assessment
-- Pass threshold: 70% score
+- The judge decides pass/fail per case
 - Metrics: Overall quality score (0-10)
 
 ### Braintrust Evaluation
 
-- **Factuality Score (0-100%)**: Measures factual consistency
-- **QA Accuracy Score (0-100%)**: Measures answer correctness
-- **Combined Score**: Average of both metrics
-- Pass threshold: 70% combined score
+Each metric is scored 0 or 1, and the overall score is their average:
+
+- **Factuality**: Consistency with the expected answer
+- **Battle**: Quality and helpfulness versus the reference answer
+- **JSON validity**: Parses as JSON when the test case expects JSON
+- **Tone**: Matches the tone expected by the test case
+- Pass threshold: 80% overall score
 
 ### LLM Judge
 
-- **Clarity**: How easy to understand (0-5)
-- **Accuracy**: Information correctness (0-5)
-- **Helpfulness**: Practical value (0-5)
-- **Completeness**: Thoroughness (0-5)
+- **Clarity**: How easy to understand (1-5)
+- **Accuracy**: Information correctness (1-5)
+- **Helpfulness**: Practical value (1-5)
+- **Completeness**: Thoroughness (1-5)
 - **Overall Score**: Average of all criteria
 
 ## Learn More

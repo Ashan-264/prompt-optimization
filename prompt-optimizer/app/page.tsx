@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { readSseData } from "./lib/sse";
 
 interface Message {
   role: "user" | "assistant";
@@ -51,9 +52,15 @@ interface LangSmithPrompt {
   manifest?: {
     prompt?: string;
   };
-  created_at: string;
+  created_at?: string;
   is_public?: boolean;
   tags?: string[];
+}
+
+function formatTimestamp(value?: string): string {
+  if (!value) return "Unknown date";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Unknown date" : date.toLocaleString();
 }
 
 interface PromptEvaluation {
@@ -98,6 +105,10 @@ interface LLMJudgeResult {
 
 type Mode = "chat" | "prompt-test" | "prompt-hub";
 
+// Which evaluation the streamed logs belong to, so a LangSmith run's progress
+// no longer renders under the Braintrust heading.
+type ActiveRun = "dataset" | "braintrust" | "langsmith" | "judge" | null;
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("chat");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -121,16 +132,19 @@ export default function Home() {
   const [suggestedRubric, setSuggestedRubric] = useState<string[]>([]);
   const [customRubric, setCustomRubric] = useState("");
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
+  const [activeRun, setActiveRun] = useState<ActiveRun>(null);
   const [langsmithOptimization, setLangsmithOptimization] = useState<{
     originalPrompt: string;
     optimizedPrompt: string;
-    logs: Array<{
-      timestamp: string;
-      phase: string;
-      status: "running" | "completed" | "error";
-      details?: string;
-    }>;
-    metrics: { originalPassRate: number; totalTests: number; failures: number };
+    logs?: ProcessLog[];
+    // The API reports these as pre-formatted strings, not numbers.
+    metrics: {
+      originalPassRate: string;
+      optimizedPassRate: string | null;
+      totalTests: number;
+      failures: number;
+      optimizedFailures: number | null;
+    };
     optimization: { reasoning: string; changes: string[] };
   } | null>(null);
 
@@ -153,6 +167,17 @@ export default function Home() {
     scrollLogsToBottom();
   }, [processingLogs]);
 
+  // Every evaluation writes into a different slice of state, so a new run has
+  // to clear the others or stale panels from a previous run stay on screen.
+  const resetResults = () => {
+    setEvaluation(null);
+    setBraintrustEvaluation(null);
+    setLangsmithOptimization(null);
+    setLlmJudgeResult(null);
+    setProcessingLogs([]);
+    setActiveRun(null);
+  };
+
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
@@ -172,37 +197,22 @@ export default function Home() {
 
       if (!response.ok) throw new Error("Failed to send message");
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
       let assistantMessage = "";
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+      for await (const data of readSseData(response)) {
+        if (data === "[DONE]") break;
 
-          const chunk = decoder.decode(value);
-          const lines = chunk.split("\n");
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = line.slice(6);
-              if (data === "[DONE]") continue;
-
-              try {
-                const parsed = JSON.parse(data);
-                if (parsed.text) {
-                  assistantMessage += parsed.text;
-                  setMessages([
-                    ...newMessages,
-                    { role: "assistant", content: assistantMessage },
-                  ]);
-                }
-              } catch (e) {
-                // Skip invalid JSON
-              }
-            }
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.text) {
+            assistantMessage += parsed.text;
+            setMessages([
+              ...newMessages,
+              { role: "assistant", content: assistantMessage },
+            ]);
           }
+        } catch {
+          // Skip invalid JSON
         }
       }
     } catch (error) {
@@ -224,7 +234,8 @@ export default function Home() {
     if (!input.trim() || isLoading) return;
 
     setIsLoading(true);
-    setEvaluation(null);
+    resetResults();
+    setActiveRun("dataset");
 
     try {
       const response = await fetch("/api/prompt-test", {
@@ -251,7 +262,8 @@ export default function Home() {
     if (!input.trim() || isLoading) return;
 
     setIsLoading(true);
-    setLlmJudgeResult(null);
+    resetResults();
+    setActiveRun("judge");
 
     try {
       const response = await fetch("/api/llm-judge", {
@@ -260,15 +272,22 @@ export default function Home() {
         body: JSON.stringify({ prompt: input }),
       });
 
-      if (!response.ok) throw new Error("Failed to run LLM judge");
+      const data = await response.json().catch(() => ({}));
 
-      const data = await response.json();
-      if (data.success) {
-        setLlmJudgeResult(data);
+      if (!response.ok || !data.success) {
+        throw new Error(
+          data.details || data.error || `HTTP ${response.status}`
+        );
       }
+
+      setLlmJudgeResult(data);
     } catch (error) {
       console.error("Error:", error);
-      alert("Failed to run LLM judge evaluation. Please try again.");
+      alert(
+        `Failed to run LLM judge evaluation: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
     } finally {
       setIsLoading(false);
     }
@@ -278,8 +297,8 @@ export default function Home() {
     if (!input.trim() || isLoading) return;
 
     setIsLoading(true);
-    setBraintrustEvaluation(null);
-    setProcessingLogs([]);
+    resetResults();
+    setActiveRun("braintrust");
 
     try {
       const response = await fetch("/api/braintrust-eval", {
@@ -290,50 +309,44 @@ export default function Home() {
 
       if (!response.ok) throw new Error("Failed to run Braintrust evaluation");
 
-      // Handle SSE stream
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
+      // Handle SSE stream. Backend errors are collected rather than thrown
+      // from inside the parse block, where the surrounding catch used to
+      // swallow them and leave the run looking like it simply stopped.
+      let backendError: string | null = null;
 
-      if (!reader) {
-        throw new Error("No response body");
-      }
+      for await (const payload of readSseData(response)) {
+        let data;
+        try {
+          data = JSON.parse(payload);
+        } catch (parseError) {
+          console.error("Failed to parse SSE data:", parseError);
+          continue;
+        }
 
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6));
-
-              if (data.type === "log") {
-                setProcessingLogs((prev) => [...prev, data.log]);
-              } else if (data.type === "complete") {
-                setBraintrustEvaluation(data.evaluation);
-              } else if (data.type === "error") {
-                throw new Error(data.error || "Evaluation failed");
-              }
-            } catch (e) {
-              console.error("Failed to parse SSE data:", e);
-            }
-          }
+        if (data.type === "log") {
+          setProcessingLogs((prev) => [...prev, data.log]);
+        } else if (data.type === "complete") {
+          setBraintrustEvaluation(data.evaluation);
+        } else if (data.type === "error") {
+          backendError = data.details || data.error || "Evaluation failed";
+          break;
         }
       }
+
+      if (backendError) throw new Error(backendError);
     } catch (error) {
       console.error("Error:", error);
-      alert("Failed to run Braintrust evaluation. Please try again.");
+      alert(
+        `Failed to run Braintrust evaluation: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
     } finally {
       setIsLoading(false);
     }
   };
 
-  const openOptimizeModal = async () => {
+  const openOptimizeModal = () => {
     setShowOptimizeModal(true);
     setOptimizeGoal("");
     setPromptName("");
@@ -369,35 +382,25 @@ Your response:`,
         }),
       });
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      let fullText = "";
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value);
-          const lines = chunk.split("\n");
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = line.slice(6);
-              if (data === "[DONE]") break;
-              try {
-                const parsed = JSON.parse(data);
-                if (parsed.text) {
-                  fullText += parsed.text;
-                }
-              } catch (e) {
-                // Skip invalid JSON lines
-              }
-            }
-          }
-        }
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `HTTP ${response.status}`);
       }
 
-      // Extract JSON array from response - handle various formats
-      console.log("Full response:", fullText); // Debug log
+      let fullText = "";
+
+      for await (const data of readSseData(response)) {
+        if (data === "[DONE]") break;
+
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.text) {
+            fullText += parsed.text;
+          }
+        } catch {
+          // Skip invalid JSON lines
+        }
+      }
 
       // Try to extract JSON array from markdown code blocks or plain text
       let jsonStr = fullText;
@@ -427,7 +430,11 @@ Your response:`,
       }
     } catch (error) {
       console.error("Error generating rubric:", error);
-      alert("Failed to generate rubric. Please try again.");
+      alert(
+        `Failed to generate rubric: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
       setSuggestedRubric([]);
     } finally {
       setIsGeneratingRubric(false);
@@ -451,8 +458,8 @@ Your response:`,
 
     setShowOptimizeModal(false);
     setIsLoading(true);
-    setLangsmithOptimization(null);
-    setProcessingLogs([]);
+    resetResults();
+    setActiveRun("langsmith");
 
     try {
       const response = await fetch("/api/langsmith-optimize", {
@@ -468,52 +475,40 @@ Your response:`,
 
       if (!response.ok) throw new Error("Failed to run optimization");
 
-      // Handle SSE stream
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
+      // Handle SSE stream. The backend error is captured and rethrown after
+      // the loop; the previous version threw from inside the try that also
+      // caught parse failures, so it depended on matching an exact message
+      // string and alerted twice.
+      let backendError: string | null = null;
 
-      if (!reader) {
-        throw new Error("No response body");
-      }
+      for await (const payload of readSseData(response)) {
+        let data;
+        try {
+          data = JSON.parse(payload);
+        } catch (parseError) {
+          console.error("Failed to parse SSE data:", parseError);
+          continue;
+        }
 
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6));
-
-              if (data.type === "log") {
-                setProcessingLogs((prev) => [...prev, data.log]);
-              } else if (data.type === "complete") {
-                setLangsmithOptimization(data.evaluation);
-              } else if (data.type === "error") {
-                console.error("Backend error:", data);
-                const errorMsg =
-                  data.details || data.error || "Optimization failed";
-                alert(`Error: ${errorMsg}`);
-                throw new Error(errorMsg);
-              }
-            } catch (e) {
-              if (e instanceof Error && e.message !== "Optimization failed") {
-                console.error("Failed to parse SSE data:", e);
-              } else {
-                throw e;
-              }
-            }
-          }
+        if (data.type === "log") {
+          setProcessingLogs((prev) => [...prev, data.log]);
+        } else if (data.type === "complete") {
+          setLangsmithOptimization(data.evaluation);
+        } else if (data.type === "error") {
+          console.error("Backend error:", data);
+          backendError = data.details || data.error || "Optimization failed";
+          break;
         }
       }
+
+      if (backendError) throw new Error(backendError);
     } catch (error) {
       console.error("Error:", error);
-      alert("Failed to run LangSmith optimization. Please try again.");
+      alert(
+        `Failed to run LangSmith optimization: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
     } finally {
       setIsLoading(false);
     }
@@ -532,7 +527,7 @@ Your response:`,
               <button
                 onClick={() => {
                   setMode("chat");
-                  setEvaluation(null);
+                  resetResults();
                 }}
                 className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                   mode === "chat"
@@ -726,9 +721,17 @@ Your response:`,
                       </button>
                       <button
                         type="button"
+                        onClick={runLLMJudge}
+                        disabled={isLoading || !input.trim()}
+                        className="flex-1 min-w-[12rem] rounded-lg bg-amber-600 px-6 py-3 text-white font-medium hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {isLoading ? "Judging..." : "LLM Judge"}
+                      </button>
+                      <button
+                        type="button"
                         onClick={openOptimizeModal}
                         disabled={isLoading || !input.trim()}
-                        className="flex-1 rounded-lg bg-purple-600 px-6 py-3 text-white font-medium hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        className="flex-1 min-w-[12rem] rounded-lg bg-purple-600 px-6 py-3 text-white font-medium hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                       >
                         {isLoading ? "Optimizing..." : "LangSmith Optimization"}
                       </button>
@@ -736,51 +739,64 @@ Your response:`,
                   </form>
                 </div>
 
+                {/* Processing logs for whichever evaluation is running. Shared
+                    so a LangSmith run no longer reports its progress under the
+                    Braintrust heading. */}
+                {processingLogs.length > 0 && (
+                  <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-lg border border-zinc-200 dark:border-zinc-700 overflow-hidden">
+                    <div className="bg-zinc-100 dark:bg-zinc-800 px-4 py-3 border-b border-zinc-200 dark:border-zinc-700">
+                      <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
+                        {activeRun === "langsmith"
+                          ? "LangSmith Optimization Log"
+                          : "Braintrust Evaluation Log"}
+                        {isLoading && (
+                          <span className="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
+                        )}
+                      </h3>
+                    </div>
+                    <div className="p-4 max-h-64 overflow-y-auto font-mono text-xs space-y-1">
+                      {processingLogs.map((log, idx) => (
+                        <div
+                          key={idx}
+                          className="flex items-start gap-2 text-zinc-700 dark:text-zinc-300"
+                        >
+                          <span className="text-zinc-400 dark:text-zinc-500 shrink-0">
+                            {new Date(log.timestamp).toLocaleTimeString()}
+                          </span>
+                          <span
+                            className={`shrink-0 ${
+                              log.status === "completed"
+                                ? "text-green-600 dark:text-green-400"
+                                : log.status === "error"
+                                ? "text-red-600 dark:text-red-400"
+                                : "text-blue-600 dark:text-blue-400"
+                            }`}
+                          >
+                            {log.status === "completed"
+                              ? "✓"
+                              : log.status === "error"
+                              ? "✗"
+                              : "▸"}
+                          </span>
+                          <span>
+                            <span className="font-semibold">{log.phase}</span>
+                            {log.details && (
+                              <span className="text-zinc-500 dark:text-zinc-400">
+                                {" "}
+                                - {log.details}
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                      <div ref={logsEndRef} />
+                    </div>
+                  </div>
+                )}
+
                 {/* LangSmith Optimization Results */}
                 {langsmithOptimization && (
                   <div className="space-y-6">
-                    {/* Processing Logs */}
-                    {langsmithOptimization.logs &&
-                      langsmithOptimization.logs.length > 0 && (
-                        <div className="bg-zinc-900 rounded-lg p-4 border border-zinc-700">
-                          <h3 className="text-lg font-semibold text-zinc-50 mb-3 flex items-center gap-2">
-                            <span className="text-purple-400">🔄</span>
-                            Processing Logs
-                          </h3>
-                          <div className="max-h-96 overflow-y-auto font-mono text-sm space-y-1">
-                            {langsmithOptimization.logs.map(
-                              (log: ProcessLog, idx: number) => (
-                                <div key={idx} className="text-zinc-300">
-                                  <span className="text-zinc-500">
-                                    [
-                                    {new Date(
-                                      log.timestamp
-                                    ).toLocaleTimeString()}
-                                    ]
-                                  </span>{" "}
-                                  <span
-                                    className={
-                                      log.status === "error"
-                                        ? "text-red-400"
-                                        : log.status === "completed"
-                                        ? "text-green-400"
-                                        : "text-blue-400"
-                                    }
-                                  >
-                                    {log.phase}
-                                  </span>
-                                  {log.details && (
-                                    <span className="text-zinc-400">
-                                      : {log.details}
-                                    </span>
-                                  )}
-                                </div>
-                              )
-                            )}
-                          </div>
-                        </div>
-                      )}
-
                     {/* Metrics Summary */}
                     <div className="bg-gradient-to-br from-purple-50 to-indigo-50 dark:from-purple-900/20 dark:to-indigo-900/20 rounded-lg p-6 border border-purple-200 dark:border-purple-800">
                       <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50 mb-4 flex items-center gap-2">
@@ -790,13 +806,26 @@ Your response:`,
                         Optimization Results
                       </h3>
 
-                      <div className="grid grid-cols-3 gap-4 mb-4">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                         <div className="text-center">
                           <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">
                             {langsmithOptimization.metrics.originalPassRate}%
                           </div>
                           <div className="text-sm text-zinc-600 dark:text-zinc-400">
                             Original Pass Rate
+                          </div>
+                        </div>
+                        {/* Result of the A/B run the backend performs after
+                            optimizing; it used to be computed and discarded. */}
+                        <div className="text-center">
+                          <div className="text-3xl font-bold text-green-600 dark:text-green-400">
+                            {langsmithOptimization.metrics.optimizedPassRate !==
+                            null
+                              ? `${langsmithOptimization.metrics.optimizedPassRate}%`
+                              : "—"}
+                          </div>
+                          <div className="text-sm text-zinc-600 dark:text-zinc-400">
+                            Optimized Pass Rate
                           </div>
                         </div>
                         <div className="text-center">
@@ -810,6 +839,16 @@ Your response:`,
                         <div className="text-center">
                           <div className="text-3xl font-bold text-red-600 dark:text-red-400">
                             {langsmithOptimization.metrics.failures}
+                            {langsmithOptimization.metrics.optimizedFailures !==
+                              null && (
+                              <span className="text-xl text-zinc-400">
+                                {" → "}
+                                {
+                                  langsmithOptimization.metrics
+                                    .optimizedFailures
+                                }
+                              </span>
+                            )}
                           </div>
                           <div className="text-sm text-zinc-600 dark:text-zinc-400">
                             Failures
@@ -1023,60 +1062,8 @@ Your response:`,
                 )}
 
                 {/* Braintrust Evaluation Results */}
-                {(braintrustEvaluation || processingLogs.length > 0) && (
+                {braintrustEvaluation && (
                   <div className="space-y-6">
-                    {/* Processing Logs */}
-                    {processingLogs.length > 0 && (
-                      <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-lg border border-zinc-200 dark:border-zinc-700 overflow-hidden">
-                        <div className="bg-zinc-100 dark:bg-zinc-800 px-4 py-3 border-b border-zinc-200 dark:border-zinc-700">
-                          <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
-                            Processing Log
-                            {isLoading && (
-                              <span className="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
-                            )}
-                          </h3>
-                        </div>
-                        <div className="p-4 max-h-64 overflow-y-auto font-mono text-xs space-y-1">
-                          {processingLogs.map((log, idx) => (
-                            <div
-                              key={idx}
-                              className="flex items-start gap-2 text-zinc-700 dark:text-zinc-300"
-                            >
-                              <span className="text-zinc-400 dark:text-zinc-500 shrink-0">
-                                {new Date(log.timestamp).toLocaleTimeString()}
-                              </span>
-                              <span
-                                className={`shrink-0 ${
-                                  log.status === "completed"
-                                    ? "text-green-600 dark:text-green-400"
-                                    : log.status === "error"
-                                    ? "text-red-600 dark:text-red-400"
-                                    : "text-blue-600 dark:text-blue-400"
-                                }`}
-                              >
-                                {log.status === "completed"
-                                  ? "✓"
-                                  : log.status === "error"
-                                  ? "✗"
-                                  : "▸"}
-                              </span>
-                              <span>
-                                <span className="font-semibold">
-                                  {log.phase}
-                                </span>
-                                {log.details && (
-                                  <span className="text-zinc-500 dark:text-zinc-400">
-                                    {" "}
-                                    - {log.details}
-                                  </span>
-                                )}
-                              </span>
-                            </div>
-                          ))}
-                          <div ref={logsEndRef} />
-                        </div>
-                      </div>
-                    )}
                     {/* Summary Stats */}
                     {braintrustEvaluation && (
                       <div className="bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20 rounded-lg p-6 border border-green-200 dark:border-green-800">
@@ -1332,7 +1319,7 @@ Your response:`,
                             <span className="text-purple-600 dark:text-purple-400">
                               💡
                             </span>
-                            Suggested Prompt Improvements (Claude Sonnet 4)
+                            Suggested Prompt Improvements (Claude Sonnet)
                           </h3>
                           <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-6">
                             Based on{" "}
@@ -1408,6 +1395,68 @@ Your response:`,
                       )}
                   </div>
                 )}
+
+                {/* LLM Judge Results */}
+                {llmJudgeResult && (
+                  <div className="bg-gradient-to-br from-amber-50 to-orange-50 dark:from-amber-900/20 dark:to-orange-900/20 rounded-lg p-6 border border-amber-200 dark:border-amber-800 space-y-4">
+                    <div>
+                      <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
+                        <span className="text-amber-600 dark:text-amber-400">
+                          ⚖️
+                        </span>
+                        LLM Judge Evaluation
+                      </h3>
+                      <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-1">
+                        A second model scores the response without seeing the
+                        original prompt.
+                      </p>
+                    </div>
+
+                    <div className="text-center">
+                      <div className="text-4xl font-bold text-amber-600 dark:text-amber-400">
+                        {llmJudgeResult.evaluation.overall_score.toFixed(1)}/5
+                      </div>
+                      <div className="text-sm text-zinc-600 dark:text-zinc-400 mt-1">
+                        Overall Score
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {(
+                        [
+                          "clarity",
+                          "accuracy",
+                          "helpfulness",
+                          "completeness",
+                        ] as const
+                      ).map((criterion) => (
+                        <div
+                          key={criterion}
+                          className="bg-white dark:bg-zinc-800 rounded p-3 text-center border border-zinc-200 dark:border-zinc-700"
+                        >
+                          <div className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
+                            {llmJudgeResult.evaluation[criterion]}/5
+                          </div>
+                          <div className="text-xs text-zinc-600 dark:text-zinc-400 mt-1 capitalize">
+                            {criterion}
+                          </div>
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">
+                            {llmJudgeResult.evaluation.reasoning[criterion]}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div>
+                      <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400 uppercase">
+                        Judged Response:
+                      </span>
+                      <p className="text-sm text-zinc-700 dark:text-zinc-300 mt-1 bg-white dark:bg-zinc-800 p-3 rounded border border-zinc-200 dark:border-zinc-700 whitespace-pre-wrap max-h-64 overflow-y-auto">
+                        {llmJudgeResult.ai_response}
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </>
@@ -1453,7 +1502,7 @@ Your response:`,
                               {prompt.name || "Untitled Prompt"}
                             </h3>
                             <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                              {new Date(prompt.created_at).toLocaleString()}
+                              {formatTimestamp(prompt.created_at)}
                             </p>
                           </div>
                           <span className="px-3 py-1 text-xs font-medium bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full">
@@ -1573,39 +1622,47 @@ Your response:`,
               </div>
 
               {/* Suggested Rubric */}
-              {suggestedRubric.length > 0 && (
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                    Suggested Evaluation Criteria:
-                  </label>
-                  <div className="space-y-2">
-                    {suggestedRubric.map((criterion, idx) => (
-                      <div
-                        key={idx}
-                        className="flex items-start gap-2 p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg"
-                      >
-                        <span className="text-purple-600 dark:text-purple-400 font-bold">
-                          {idx + 1}.
-                        </span>
-                        <span className="text-sm text-zinc-700 dark:text-zinc-300">
-                          {criterion}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+              <div>
+                {suggestedRubric.length > 0 && (
+                  <>
+                    <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                      Suggested Evaluation Criteria:
+                    </label>
+                    <div className="space-y-2">
+                      {suggestedRubric.map((criterion, idx) => (
+                        <div
+                          key={idx}
+                          className="flex items-start gap-2 p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg"
+                        >
+                          <span className="text-purple-600 dark:text-purple-400 font-bold">
+                            {idx + 1}.
+                          </span>
+                          <span className="text-sm text-zinc-700 dark:text-zinc-300">
+                            {criterion}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
 
-                  {/* Add Custom Criterion */}
-                  <div className="mt-3">
-                    <input
-                      type="text"
-                      value={customRubric}
-                      onChange={(e) => setCustomRubric(e.target.value)}
-                      placeholder="Add one more criterion (optional)"
-                      className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-4 py-2 text-sm text-zinc-900 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                    />
-                  </div>
+                {/* Add Custom Criterion. Always available: the run accepts a
+                    custom-only rubric, but this input used to be hidden until
+                    suggestions existed, making that unreachable. */}
+                <div className="mt-3">
+                  <input
+                    type="text"
+                    value={customRubric}
+                    onChange={(e) => setCustomRubric(e.target.value)}
+                    placeholder={
+                      suggestedRubric.length > 0
+                        ? "Add one more criterion (optional)"
+                        : "Write your own evaluation criterion"
+                    }
+                    className="w-full rounded-lg border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-4 py-2 text-sm text-zinc-900 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  />
                 </div>
-              )}
+              </div>
 
               {/* Action Buttons */}
               <div className="flex gap-3 mt-6">
@@ -1620,7 +1677,7 @@ Your response:`,
                   disabled={
                     !promptName.trim() ||
                     !optimizeGoal.trim() ||
-                    suggestedRubric.length === 0
+                    (suggestedRubric.length === 0 && !customRubric.trim())
                   }
                   className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >

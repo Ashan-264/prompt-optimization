@@ -1,26 +1,39 @@
 import { NextRequest } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import Groq from "groq-sdk";
 import { Client } from "langsmith";
 import { traceable } from "langsmith/traceable";
-import "uuid";
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+import {
+  CLAUDE_MODEL,
+  NO_THINKING,
+  fillPrompt,
+  getAnthropic,
+  getGroq,
+  messageText,
+  parseJsonBlock,
+} from "../../lib/llm";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
 const langsmithClient = new Client({
   apiKey: process.env.LANGSMITH_API_KEY,
 });
 
+const TEST_CASE_COUNT = 5;
+
 interface TestCase {
   input: string;
   rubric: string[];
+}
+
+interface RubricResult {
+  criterion: string;
+  passed: boolean;
+  reason?: string;
+}
+
+interface JudgeResult {
+  score: number;
+  failureReason?: string;
+  rubricResults: RubricResult[];
 }
 
 interface TestResult {
@@ -28,12 +41,19 @@ interface TestResult {
   output: string;
   score: number;
   failureReason?: string;
-  rubricResults: { criterion: string; passed: boolean; reason?: string }[];
+  rubricResults: RubricResult[];
+}
+
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { prompt, goal, promptName, rubric } = body;
+  const { prompt, goal, promptName } = body;
+  const rubric = toStringArray(body.rubric);
 
   const logs: Array<{
     timestamp: string;
@@ -45,6 +65,32 @@ export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new TransformStream();
   const writer = stream.writable.getWriter();
+
+  // Once the browser disconnects, every write rejects. Without this guard the
+  // failure inside the catch block became an unhandled rejection.
+  let streamClosed = false;
+
+  const send = async (payload: unknown) => {
+    if (streamClosed) return;
+    try {
+      await writer.write(
+        encoder.encode(`data: ${JSON.stringify(payload)}\n\n`)
+      );
+    } catch (error) {
+      streamClosed = true;
+      console.warn("SSE client disconnected:", error);
+    }
+  };
+
+  const closeStream = async () => {
+    if (streamClosed) return;
+    streamClosed = true;
+    try {
+      await writer.close();
+    } catch {
+      // Already closed or aborted by the client.
+    }
+  };
 
   const sendLog = async (
     phase: string,
@@ -58,80 +104,82 @@ export async function POST(request: NextRequest) {
       details,
     };
     logs.push(log);
-    await writer.write(
-      encoder.encode(`data: ${JSON.stringify({ type: "log", log })}\n\n`)
-    );
+    await send({ type: "log", log });
+  };
+
+  const fail = async (error: string, details?: string) => {
+    await sendLog("Error", "error", details ?? error);
+    await send({ type: "error", error, details });
+    await closeStream();
   };
 
   (async () => {
     try {
       if (!prompt || !goal || !promptName) {
-        await sendLog("Error", "error", "Missing required fields");
-        await writer.write(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: "error",
-              error: "Missing prompt, goal, or promptName",
-            })}\n\n`
-          )
+        await fail("Missing prompt, goal, or promptName", "Missing required fields");
+        return;
+      }
+
+      if (rubric.length === 0) {
+        await fail(
+          "At least one rubric criterion is required",
+          "Rubric was empty or not a list of strings"
         );
-        await writer.close();
         return;
       }
 
       // Check for required API keys
       if (!process.env.GEMINI_API_KEY) {
-        await sendLog("Error", "error", "Gemini API key not configured");
-        await writer.write(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: "error",
-              error: "Gemini API key not configured",
-              details:
-                "Please add GEMINI_API_KEY to your environment variables",
-            })}\n\n`
-          )
+        await fail(
+          "Gemini API key not configured",
+          "Please add GEMINI_API_KEY to your environment variables"
         );
-        await writer.close();
+        return;
+      }
+
+      if (!process.env.ANTHROPIC_API_KEY) {
+        await fail(
+          "Anthropic API key not configured",
+          "Please add ANTHROPIC_API_KEY to your environment variables"
+        );
         return;
       }
 
       if (!process.env.LANGSMITH_API_KEY) {
-        await sendLog("Error", "error", "LangSmith API key not configured");
-        await writer.write(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: "error",
-              error: "LangSmith API key not configured",
-              details:
-                "Please add LANGSMITH_API_KEY to your environment variables",
-            })}\n\n`
-          )
+        await fail(
+          "LangSmith API key not configured",
+          "Please add LANGSMITH_API_KEY to your environment variables"
         );
-        await writer.close();
         return;
       }
 
-      // Phase 1: Save to Prompt Hub
-      await sendLog(
-        "Saving to Prompt Hub",
-        "running",
-        `Saving as "${promptName}"`
-      );
-
+      // Phase 1: Version this run. Nothing is pushed to the LangSmith Prompt
+      // Hub here - the failure dataset below is what lands in LangSmith.
       const promptVersion = `v${Date.now()}`;
       const fullPromptName = `${promptName}-${promptVersion}`;
 
-      await sendLog("Prompt saved", "completed", `Version: ${promptVersion}`);
+      await sendLog(
+        "Versioning prompt",
+        "completed",
+        `Tracking this run as "${fullPromptName}"`
+      );
 
       // Phase 2: Generate synthetic dataset with Gemini
       await sendLog(
         "Generating test dataset",
         "running",
-        "Using Gemini 2.0 Flash to create 2 test cases"
+        `Using Gemini 2.5 Flash Lite to create ${TEST_CASE_COUNT} test cases`
       );
 
       const testCases = await generateSyntheticDataset(prompt, goal, rubric);
+
+      if (testCases.length === 0) {
+        await fail(
+          "Failed to generate any usable test cases",
+          "The dataset generator returned no test cases with a usable input"
+        );
+        return;
+      }
 
       await sendLog(
         "Dataset generated",
@@ -143,7 +191,7 @@ export async function POST(request: NextRequest) {
       await sendLog(
         "Running tests",
         "running",
-        "Executing prompt with Gemini 2.0 Flash"
+        "Executing prompt with Gemini 2.5 Flash Lite"
       );
 
       const results: TestResult[] = [];
@@ -157,7 +205,7 @@ export async function POST(request: NextRequest) {
 
         const output = await executePromptWithGemini(prompt, testCase.input);
 
-        // Judge with Claude Sonnet 4
+        // Judge with Claude
         const judgeResult = await judgeWithClaude(
           testCase.input,
           output,
@@ -195,6 +243,8 @@ export async function POST(request: NextRequest) {
       let optimizedPrompt = prompt;
       let optimizationReasoning = "";
       let changes: string[] = [];
+      const optimizedResults: TestResult[] = [];
+      let optimizedFailures = 0;
 
       if (failedResults.length > 0) {
         await sendLog(
@@ -238,7 +288,6 @@ export async function POST(request: NextRequest) {
           "Running A/B comparison"
         );
 
-        const optimizedResults: TestResult[] = [];
         for (const testCase of testCases) {
           const output = await executePromptWithGemini(
             optimizedPrompt,
@@ -260,9 +309,7 @@ export async function POST(request: NextRequest) {
           });
         }
 
-        const optimizedFailures = optimizedResults.filter(
-          (r) => r.score === 0
-        ).length;
+        optimizedFailures = optimizedResults.filter((r) => r.score === 0).length;
 
         await sendLog(
           "A/B test complete",
@@ -277,38 +324,44 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Calculate metrics
-      const originalPassRate =
-        ((results.length - failedResults.length) / results.length) * 100;
+      // Calculate metrics. Guarded: an empty result set would report NaN.
+      const passRate = (failures: number, total: number) =>
+        total > 0 ? ((total - failures) / total) * 100 : 0;
+
+      const originalPassRate = passRate(failedResults.length, results.length);
+      const hasOptimizedRun = optimizedResults.length > 0;
 
       // Send final results
-      await writer.write(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            type: "complete",
-            evaluation: {
-              originalPrompt: prompt,
-              optimizedPrompt,
-              promptName: fullPromptName,
-              goal,
-              rubric,
-              originalResults: results,
-              metrics: {
-                originalPassRate: originalPassRate.toFixed(1),
-                totalTests: results.length,
-                failures: failedResults.length,
-              },
-              optimization: {
-                reasoning: optimizationReasoning,
-                changes,
-              },
-              logs,
-            },
-          })}\n\n`
-        )
-      );
+      await send({
+        type: "complete",
+        evaluation: {
+          originalPrompt: prompt,
+          optimizedPrompt,
+          promptName: fullPromptName,
+          goal,
+          rubric,
+          originalResults: results,
+          // The A/B run was previously computed and then discarded, so the UI
+          // could never show what the optimized prompt actually scored.
+          optimizedResults,
+          metrics: {
+            originalPassRate: originalPassRate.toFixed(1),
+            optimizedPassRate: hasOptimizedRun
+              ? passRate(optimizedFailures, optimizedResults.length).toFixed(1)
+              : null,
+            totalTests: results.length,
+            failures: failedResults.length,
+            optimizedFailures: hasOptimizedRun ? optimizedFailures : null,
+          },
+          optimization: {
+            reasoning: optimizationReasoning,
+            changes,
+          },
+          logs,
+        },
+      });
 
-      await writer.close();
+      await closeStream();
     } catch (error) {
       console.error("Error in langsmith-optimize API:", error);
       await sendLog(
@@ -317,19 +370,18 @@ export async function POST(request: NextRequest) {
         error instanceof Error ? error.message : "Unknown error"
       );
 
-      await writer.write(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            type: "error",
-            error: "Failed to optimize prompt",
-            details: error instanceof Error ? error.message : "Unknown error",
-            logs,
-          })}\n\n`
-        )
-      );
-      await writer.close();
+      await send({
+        type: "error",
+        error: "Failed to optimize prompt",
+        details: error instanceof Error ? error.message : "Unknown error",
+        logs,
+      });
+      await closeStream();
     }
-  })();
+  })().catch((error) => {
+    // Last resort: never let the detached task reject unhandled.
+    console.error("Unhandled langsmith-optimize stream error:", error);
+  });
 
   return new Response(stream.readable, {
     headers: {
@@ -340,13 +392,35 @@ export async function POST(request: NextRequest) {
   });
 }
 
-// Generate test cases with Gemini (fallback to Gemma 3 12B)
+// The generator models are free-form, so entries without a usable input are
+// dropped and a missing per-case rubric falls back to the run's rubric.
+function normalizeTestCases(value: unknown, rubric: string[]): TestCase[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((entry): TestCase[] => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const candidate = entry as Record<string, unknown>;
+    if (typeof candidate.input !== "string" || !candidate.input.trim()) {
+      return [];
+    }
+
+    const caseRubric = toStringArray(candidate.rubric);
+    return [
+      {
+        input: candidate.input,
+        rubric: caseRubric.length > 0 ? caseRubric : rubric,
+      },
+    ];
+  });
+}
+
+// Generate test cases with Gemini (fallback to Groq Llama)
 async function generateSyntheticDataset(
   prompt: string,
   goal: string,
   rubric: string[]
 ): Promise<TestCase[]> {
-  const generationPrompt = `Generate 5 diverse test cases for this prompt evaluation.
+  const generationPrompt = `Generate ${TEST_CASE_COUNT} diverse test cases for this prompt evaluation.
 
 PROMPT TO TEST:
 ${prompt}
@@ -357,9 +431,9 @@ ${goal}
 EVALUATION RUBRIC:
 ${rubric.map((r, i) => `${i + 1}. ${r}`).join("\n")}
 
-Generate 2 test input scenarios that would thoroughly test whether the prompt achieves the goal and meets the rubric criteria.
+Generate ${TEST_CASE_COUNT} test input scenarios that would thoroughly test whether the prompt achieves the goal and meets the rubric criteria.
 
-Return ONLY a JSON array:
+Return ONLY a JSON array of ${TEST_CASE_COUNT} objects in this shape:
 [
   {
     "input": "Test input that replaces {{input}} in the prompt",
@@ -374,19 +448,27 @@ Return ONLY a JSON array:
     });
 
     const result = await model.generateContent(generationPrompt);
-    const response = result.response.text();
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    const testCases = normalizeTestCases(
+      parseJsonBlock<unknown>(result.response.text(), "array"),
+      rubric
+    );
 
-    if (!jsonMatch) {
+    if (testCases.length === 0) {
       throw new Error("Failed to parse Gemini response");
     }
 
-    return JSON.parse(jsonMatch[0]);
+    return testCases;
   } catch (geminiError) {
     console.warn("Gemini failed, falling back to Groq Llama:", geminiError);
 
+    if (!process.env.GROQ_API_KEY) {
+      throw new Error(
+        "Failed to generate test cases with Gemini, and GROQ_API_KEY is not configured for fallback"
+      );
+    }
+
     // Fallback to Groq Llama
-    const completion = await groq.chat.completions.create({
+    const completion = await getGroq().chat.completions.create({
       messages: [
         {
           role: "user",
@@ -399,24 +481,27 @@ Return ONLY a JSON array:
     });
 
     const response = completion.choices[0]?.message?.content || "";
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    const testCases = normalizeTestCases(
+      parseJsonBlock<unknown>(response, "array"),
+      rubric
+    );
 
-    if (!jsonMatch) {
+    if (testCases.length === 0) {
       throw new Error(
         "Failed to generate test cases with both Gemini and Groq"
       );
     }
 
-    return JSON.parse(jsonMatch[0]);
+    return testCases;
   }
 }
 
-// Execute prompt with Gemini 2.0 Flash (fallback to Gemma 3 12B)
+// Execute prompt with Gemini (fallback to Groq Llama)
 async function executePromptWithGemini(
   prompt: string,
   input: string
 ): Promise<string> {
-  const formattedPrompt = prompt.replace(/\{\{input\}\}/g, input);
+  const formattedPrompt = fillPrompt(prompt, input);
 
   try {
     // Try Gemini 2.5 Flash Lite first
@@ -429,8 +514,14 @@ async function executePromptWithGemini(
   } catch (geminiError) {
     console.warn("Gemini failed, falling back to Groq Llama:", geminiError);
 
+    if (!process.env.GROQ_API_KEY) {
+      throw new Error(
+        "Failed to execute prompt with Gemini, and GROQ_API_KEY is not configured for fallback"
+      );
+    }
+
     // Fallback to Groq Llama
-    const completion = await groq.chat.completions.create({
+    const completion = await getGroq().chat.completions.create({
       messages: [
         {
           role: "user",
@@ -446,17 +537,13 @@ async function executePromptWithGemini(
   }
 }
 
-// Judge output with Claude Sonnet 4
+// Judge output with Claude
 async function judgeWithClaude(
   input: string,
   output: string,
   rubric: string[],
   goal: string
-): Promise<{
-  score: number;
-  failureReason?: string;
-  rubricResults: Array<{ criterion: string; passed: boolean; reason?: string }>;
-}> {
+): Promise<JudgeResult> {
   const judgePrompt = `You are evaluating LLM output against a rubric.
 
 GOAL: ${goal}
@@ -481,26 +568,59 @@ Return ONLY valid JSON:
   ]
 }`;
 
-  const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
-    max_tokens: 500,
+  const unscored = (failureReason: string): JudgeResult => ({
+    score: 0,
+    failureReason,
+    rubricResults: rubric.map((r) => ({ criterion: r, passed: false })),
+  });
+
+  // Enough room for one entry per criterion; a truncated response would fail
+  // to parse and silently score every test zero.
+  const message = await getAnthropic().messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 1024,
+    thinking: NO_THINKING,
     messages: [{ role: "user", content: judgePrompt }],
   });
 
-  const textContent = message.content.find((block) => block.type === "text");
-  const text =
-    textContent && textContent.type === "text" ? textContent.text : "{}";
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-
-  if (!jsonMatch) {
-    return {
-      score: 0,
-      failureReason: "Failed to parse judge response",
-      rubricResults: rubric.map((r) => ({ criterion: r, passed: false })),
-    };
+  const parsed = parseJsonBlock<Record<string, unknown>>(
+    messageText(message),
+    "object"
+  );
+  if (!parsed) {
+    return unscored("Failed to parse judge response");
   }
 
-  return JSON.parse(jsonMatch[0]);
+  // rubricResults is read downstream by the optimizer, so it must be an array.
+  const rubricResults = Array.isArray(parsed.rubricResults)
+    ? parsed.rubricResults.flatMap((entry): RubricResult[] => {
+        if (typeof entry !== "object" || entry === null) return [];
+        const candidate = entry as Record<string, unknown>;
+        return [
+          {
+            criterion:
+              typeof candidate.criterion === "string"
+                ? candidate.criterion
+                : "Unnamed criterion",
+            passed: candidate.passed === true,
+            reason:
+              typeof candidate.reason === "string" ? candidate.reason : undefined,
+          },
+        ];
+      })
+    : [];
+
+  return {
+    score: Number(parsed.score) === 1 ? 1 : 0,
+    failureReason:
+      typeof parsed.failureReason === "string"
+        ? parsed.failureReason
+        : undefined,
+    rubricResults:
+      rubricResults.length > 0
+        ? rubricResults
+        : rubric.map((r) => ({ criterion: r, passed: Number(parsed.score) === 1 })),
+  };
 }
 
 // Log to LangSmith with traceable
@@ -509,11 +629,7 @@ const logToLangSmith = traceable(
     promptName: string,
     input: string,
     output: string,
-    judgeResult: {
-      score: number;
-      failureReason?: string;
-      rubricResults: { criterion: string; passed: boolean; reason?: string }[];
-    }
+    judgeResult: JudgeResult
   ) => {
     return {
       promptName,
@@ -603,20 +719,24 @@ Return ONLY valid JSON:
   ]
 }`;
 
-  const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+  const message = await getAnthropic().messages.create({
+    model: CLAUDE_MODEL,
     max_tokens: 2000,
+    thinking: NO_THINKING,
     messages: [{ role: "user", content: optimizationPrompt }],
   });
 
-  const textContent = message.content.find((block) => block.type === "text");
-  const text =
-    textContent && textContent.type === "text" ? textContent.text : "{}";
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-
-  if (!jsonMatch) {
+  const parsed = parseJsonBlock<Record<string, unknown>>(
+    messageText(message),
+    "object"
+  );
+  if (!parsed || typeof parsed.prompt !== "string") {
     throw new Error("Failed to generate optimization");
   }
 
-  return JSON.parse(jsonMatch[0]);
+  return {
+    prompt: parsed.prompt,
+    reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : "",
+    changes: toStringArray(parsed.changes),
+  };
 }

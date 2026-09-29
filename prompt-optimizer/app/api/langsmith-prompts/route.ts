@@ -5,6 +5,21 @@ const langsmithClient = new Client({
   apiKey: process.env.LANGSMITH_API_KEY,
 });
 
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 100;
+const TIMEOUT_MS = 10_000;
+
+// Rejects if the wrapped promise has not settled by the deadline, and always
+// clears its timer so a settled request leaves nothing pending.
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Request timeout")), ms);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 export async function GET(request: NextRequest) {
   try {
     if (!process.env.LANGSMITH_API_KEY) {
@@ -16,57 +31,32 @@ export async function GET(request: NextRequest) {
 
     // Get query parameters
     const searchParams = request.nextUrl.searchParams;
-    const limit = parseInt(searchParams.get("limit") || "20");
+    const requestedLimit = Number.parseInt(searchParams.get("limit") ?? "", 10);
+    const limit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(requestedLimit, MAX_LIMIT)
+        : DEFAULT_LIMIT;
 
-    // Fetch prompts from LangSmith with timeout
-    // Note: listPrompts doesn't accept limit/offset, we'll handle pagination client-side
-    const promptsPromise = langsmithClient.listPrompts();
+    // listPrompts() returns an async iterator, not a promise. Racing the
+    // iterator itself against a timer resolved immediately, so the pagination
+    // below was completely unguarded. Each page fetch gets the deadline.
+    const iterator = langsmithClient.listPrompts()[Symbol.asyncIterator]();
+    const prompts = [];
+    const deadline = Date.now() + TIMEOUT_MS;
 
-    // Add timeout to prevent hanging
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Request timeout")), 10000)
-    );
+    while (prompts.length < limit) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("Request timeout");
 
-    const promptsResponse = await Promise.race([
-      promptsPromise,
-      timeoutPromise,
-    ]);
-
-    // Convert to array - listPrompts may return an iterator or object
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let promptsArray: any[] = [];
-    if (promptsResponse) {
-      if (Array.isArray(promptsResponse)) {
-        promptsArray = promptsResponse;
-      } else if (Symbol.asyncIterator in Object(promptsResponse)) {
-        // Handle async iterator with limit to prevent infinite loops
-        let count = 0;
-        const maxItems = limit || 100;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        for await (const prompt of promptsResponse as AsyncIterable<any>) {
-          if (count >= maxItems) break;
-          promptsArray.push(prompt);
-          count++;
-        }
-      } else if (
-        typeof promptsResponse === "object" &&
-        "prompts" in promptsResponse
-      ) {
-        // Handle object with prompts property
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        promptsArray = Array.isArray(
-          (promptsResponse as { prompts: any }).prompts
-        )
-          ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (promptsResponse as { prompts: any[] }).prompts
-          : [];
-      }
+      const next = await withTimeout(iterator.next(), remaining);
+      if (next.done) break;
+      prompts.push(next.value);
     }
 
     return NextResponse.json({
       success: true,
-      prompts: promptsArray,
-      count: promptsArray.length,
+      prompts,
+      count: prompts.length,
     });
   } catch (error) {
     console.error("Error fetching LangSmith prompts:", error);

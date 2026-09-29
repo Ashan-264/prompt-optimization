@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
 import { Client } from "langsmith";
 import { v4 as uuidv4 } from "uuid";
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+import {
+  CLAUDE_MODEL,
+  NO_THINKING,
+  fillPrompt,
+  getAnthropic,
+  messageText,
+  parseJsonBlock,
+} from "../../lib/llm";
 
 const langsmithClient = new Client({
   apiKey: process.env.LANGSMITH_API_KEY,
@@ -34,25 +37,42 @@ const SAMPLE_DATASETS = {
   ],
 };
 
+type DatasetName = keyof typeof SAMPLE_DATASETS;
+
+const DATASET_NAMES = Object.keys(SAMPLE_DATASETS) as DatasetName[];
+
+// Indexing SAMPLE_DATASETS with an arbitrary string reaches inherited Object
+// members ("constructor", "toString", ...), which are truthy and would slip
+// past a plain `|| SAMPLE_DATASETS.general` fallback.
+function resolveDataset(value: unknown): DatasetName {
+  return DATASET_NAMES.includes(value as DatasetName)
+    ? (value as DatasetName)
+    : "general";
+}
+
+interface Evaluation {
+  passed: boolean;
+  score: number;
+  feedback: string;
+}
+
 // Run Claude with the prompt
 async function runClaudePrompt(prompt: string, input: string): Promise<string> {
-  const formattedPrompt = prompt.replace(/\{\{input\}\}/g, input);
-
-  const message = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+  const message = await getAnthropic().messages.create({
+    model: CLAUDE_MODEL,
     max_tokens: 1024,
-    messages: [{ role: "user", content: formattedPrompt }],
+    thinking: NO_THINKING,
+    messages: [{ role: "user", content: fillPrompt(prompt, input) }],
   });
 
-  const textContent = message.content.find((block) => block.type === "text");
-  return textContent && textContent.type === "text" ? textContent.text : "";
+  return messageText(message);
 }
 
 // Use LangSmith for evaluation
 async function evaluateWithLangSmith(
   output: string,
   expectedQuality: string
-): Promise<{ passed: boolean; score: number; feedback: string }> {
+): Promise<Evaluation> {
   try {
     const evaluationPrompt = `Evaluate the following response for ${expectedQuality} quality.
 Score from 0.0 to 1.0 where:
@@ -69,19 +89,20 @@ ${output}
 Return ONLY a JSON object in this format:
 {"score": <number 0-1>, "passed": <boolean>, "feedback": "<brief explanation>"}`;
 
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+    const message = await getAnthropic().messages.create({
+      model: CLAUDE_MODEL,
       max_tokens: 512,
+      thinking: NO_THINKING,
       messages: [{ role: "user", content: evaluationPrompt }],
     });
 
-    const textContent = message.content.find((block) => block.type === "text");
-    if (!textContent || textContent.type !== "text") {
+    const text = messageText(message);
+    if (!text) {
       return { score: 0, passed: false, feedback: "Evaluation failed" };
     }
 
-    const jsonMatch = textContent.text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
+    const result = parseJsonBlock<Record<string, unknown>>(text, "object");
+    if (!result) {
       return {
         score: 0,
         passed: false,
@@ -89,8 +110,17 @@ Return ONLY a JSON object in this format:
       };
     }
 
-    const result = JSON.parse(jsonMatch[0]);
-    return result;
+    // A missing or non-numeric score would poison the running totals with NaN,
+    // and the model sometimes reports "passed" as a string.
+    const score = Number(result.score);
+    return {
+      score: Number.isFinite(score) ? Math.min(1, Math.max(0, score)) : 0,
+      passed: result.passed === true || result.passed === "true",
+      feedback:
+        typeof result.feedback === "string"
+          ? result.feedback
+          : "No feedback provided",
+    };
   } catch (error) {
     console.error("Evaluation error:", error);
     return { score: 0, passed: false, feedback: "Evaluation error occurred" };
@@ -99,7 +129,7 @@ Return ONLY a JSON object in this format:
 
 export async function POST(request: NextRequest) {
   try {
-    const { prompt, dataset = "general" } = await request.json();
+    const { prompt, dataset } = await request.json();
 
     if (!prompt || typeof prompt !== "string") {
       return NextResponse.json(
@@ -109,12 +139,11 @@ export async function POST(request: NextRequest) {
     }
 
     // Select dataset
-    const testData =
-      SAMPLE_DATASETS[dataset as keyof typeof SAMPLE_DATASETS] ||
-      SAMPLE_DATASETS.general;
+    const datasetName = resolveDataset(dataset);
+    const testData = SAMPLE_DATASETS[datasetName];
 
     // Create a unique experiment name
-    const experimentName = `prompt-test-${dataset}-${uuidv4().slice(0, 8)}`;
+    const experimentName = `prompt-test-${datasetName}-${uuidv4().slice(0, 8)}`;
 
     // Log to LangSmith (if API key is configured)
     const tracingEnabled = !!process.env.LANGSMITH_API_KEY;
@@ -202,7 +231,7 @@ export async function POST(request: NextRequest) {
       success: true,
       evaluation: {
         prompt,
-        dataset,
+        dataset: datasetName,
         experiment_name: experimentName,
         langsmith_enabled: tracingEnabled,
         summary: {
